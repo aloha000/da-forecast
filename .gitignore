@@ -1,0 +1,5 @@
+model/fuxi_short.pth
+output/
+test_data/
+model/onnx/
+
