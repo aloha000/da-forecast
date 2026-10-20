@@ -584,6 +584,7 @@ class SwinLayer(nn.Module):
             depth=4,
             num_heads=8,
             mlp_ratio=4.,
+            mask_type='h'
     ):
 
         super().__init__()
@@ -600,6 +601,7 @@ class SwinLayer(nn.Module):
                 num_heads=num_heads,
                 window_size=window_size,
                 shift_size=0 if (i % 2 == 0) else window_size // 2,
+                mask_type=mask_type,
                 mlp_ratio=mlp_ratio,
                 norm_layer=norm_layer,
             )

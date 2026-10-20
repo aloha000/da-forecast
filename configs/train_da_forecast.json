@@ -1,0 +1,47 @@
+{
+  "data": {
+    "era5_path": "/inspire/ssd/project/sais-weather/public/linan/qz_da_ngl/da_ngl/dataset/label_europe_0p25.zarr",
+    "ztd_path": "/inspire/ssd/project/sais-weather/public/linan/qz_da_ngl/da_ngl/dataset/ngl_europe_0p25_5min.zarr",
+    "conds_path": "model/conds.npy",
+    "global_lat_path": "test_data/latitude_era5.npy",
+    "global_lon_path": "test_data/longitude_era5.npy",
+    "mean_std_dir": "/inspire/ssd/project/sais-weather/public/fuxi-obs/obs-grid-qc_new/mean_std",
+    "obs_frames": 10,
+    "train_split": ["2022-01-01T00:00:00", "2024-05-01T00:00:00"],
+    "val_split": ["2024-05-01T00:00:00", "2025-01-01T00:00:00"],
+    "test_split": ["2025-01-01T00:00:00", "2025-10-01T00:00:00"]
+  },
+  "model": {
+    "image_size": [80, 120],
+    "era5_channels": 70,
+    "era5_frames": 2,
+    "era_static_channels": 5,
+    "obs_static_channels": 3,
+    "out_channels": 70,
+    "embed_dim": 256,
+    "patch_size": 4,
+    "window_size": 5,
+    "depths": [2, 2, 2, 2],
+    "num_heads": 8,
+    "mlp_ratio": 4.0,
+    "time_dim": 12,
+    "use_obs": true
+  },
+  "train": {
+    "seed": 2000,
+    "epochs": 40,
+    "batch_size_per_gpu": 8,
+    "gradient_accumulation": 1,
+    "num_workers": 4,
+    "learning_rate": 0.0002,
+    "min_learning_rate": 0.000001,
+    "weight_decay": 0.05,
+    "warmup_steps": 100,
+    "gradient_clip": 1.0,
+    "log_interval": 20,
+    "halo_weight": 0.5,
+    "halo_radius": 3,
+    "amp": "bf16",
+    "output_dir": "work_dirs/da_forecast_6h_40epoch"
+  }
+}
