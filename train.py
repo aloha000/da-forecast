@@ -1,4 +1,4 @@
-"""Single- or multi-GPU training for the regional DA forecast model."""
+"""FSDP training for the global DA forecast model."""
 
 from __future__ import annotations
 
@@ -10,16 +10,28 @@ import os
 from pathlib import Path
 import random
 import time
+import warnings
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp import (
+    BackwardPrefetch,
+    FullOptimStateDictConfig,
+    FullStateDictConfig,
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    ShardingStrategy,
+    StateDictType,
+)
+from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.utils.data import DataLoader, DistributedSampler, Subset
 
 from data import DAForecastDataset
 from model import DAForecastNet
+from model.fuxi import SwinBlock
+from model.fuxi_pretrained import load_fuxi_pretrained
 
 
 def parse_args():
@@ -28,6 +40,8 @@ def parse_args():
     parser.add_argument("--check-data", action="store_true")
     parser.add_argument("--overfit-samples", type=int, default=0)
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--pretrained-fuxi", default=None,
+                        help="initialize FuXi forecast core before FSDP wrapping")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--epochs", type=int, default=None)
     return parser.parse_args()
@@ -80,7 +94,8 @@ def make_dataset(data_config: dict, split_name: str):
         conds_path=data_config["conds_path"],
         global_lat_path=data_config["global_lat_path"],
         global_lon_path=data_config["global_lon_path"],
-        obs_frames=data_config["obs_frames"],
+        obs_history_hours=data_config["obs_history_hours"],
+        obs_interval_minutes=data_config["obs_interval_minutes"],
     )
 
 
@@ -96,14 +111,28 @@ def print_data_check(train_dataset, val_dataset):
     valid = sample["obs_mask"].sum().item()
     total = sample["obs_mask"].numel()
     print(f"observed ZTD cells: {int(valid)}/{total} ({100.0 * valid / total:.2f}%)")
-    print("alignment: ERA5(t-6h,t) + ZTD(t-45min..t) -> ERA5(t+6h)")
+    print(
+        "alignment: ERA5(t-6h,t) + "
+        f"ZTD(t-{train_dataset.obs_history_hours}h..t every "
+        f"{train_dataset.obs_interval_minutes}min; "
+        f"{train_dataset.obs_frames} frames) -> ERA5(t+6h)"
+    )
 
 
 def move_batch(batch, device):
     return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
 
-def weighted_losses(prediction, target, target_mask, obs_static, lat, halo_weight, radius):
+def weighted_losses(
+    prediction,
+    target,
+    target_mask,
+    obs_static,
+    lat,
+    halo_weight,
+    radius,
+    loss_mode="global_only",
+):
     error = (prediction - target).abs()
     lat_weight = torch.cos(torch.deg2rad(lat)).clamp_min(0.0)
     lat_weight = lat_weight / lat_weight.mean()
@@ -118,7 +147,18 @@ def weighted_losses(prediction, target, target_mask, obs_static, lat, halo_weigh
     halo_valid = valid * halo
     halo_denominator = (halo_valid * lat_weight).sum().clamp_min(1.0)
     halo_loss = (error * halo_valid * lat_weight).sum() / halo_denominator
-    return global_loss + float(halo_weight) * halo_loss, global_loss, halo_loss
+    if loss_mode == "halo_only":
+        total_loss = halo_loss
+    elif loss_mode == "global_only":
+        total_loss = global_loss
+    elif loss_mode == "global_plus_halo":
+        total_loss = global_loss + float(halo_weight) * halo_loss
+    else:
+        raise ValueError(
+            f"unsupported loss_mode={loss_mode!r}; expected halo_only, "
+            "global_only, or global_plus_halo"
+        )
+    return total_loss, global_loss, halo_loss
 
 
 def autocast_settings(device, mode: str):
@@ -131,6 +171,43 @@ def autocast_settings(device, mode: str):
     if mode == "fp16":
         return True, torch.float16
     raise ValueError(f"unsupported amp mode {mode!r}")
+
+
+def fsdp_mixed_precision(device, mode: str):
+    """Build FSDP's parameter and reduction precision policy."""
+    if device.type != "cuda" or mode == "fp32":
+        return None
+    if mode == "bf16":
+        if not torch.cuda.is_bf16_supported():
+            raise RuntimeError("this GPU does not support bf16; set train.amp to fp16")
+        dtype = torch.bfloat16
+    elif mode == "fp16":
+        dtype = torch.float16
+    else:
+        raise ValueError(f"unsupported amp mode {mode!r}")
+    return MixedPrecision(
+        param_dtype=dtype,
+        reduce_dtype=dtype,
+        buffer_dtype=dtype,
+        cast_forward_inputs=True,
+    )
+
+
+def wrap_fsdp(model, device, train_config):
+    """FULL_SHARD the root model and wrap each FuXi Swin block separately."""
+    fsdp_config = train_config.get("fsdp", {})
+    return FSDP(
+        model,
+        auto_wrap_policy=ModuleWrapPolicy({SwinBlock}),
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+        mixed_precision=fsdp_mixed_precision(device, train_config["amp"]),
+        device_id=device,
+        sync_module_states=bool(fsdp_config.get("sync_module_states", True)),
+        forward_prefetch=bool(fsdp_config.get("forward_prefetch", True)),
+        limit_all_gathers=bool(fsdp_config.get("limit_all_gathers", True)),
+        use_orig_params=bool(fsdp_config.get("use_orig_params", True)),
+    )
 
 
 def forward_model(model, batch):
@@ -160,6 +237,7 @@ def validate(model, loader, device, lat, train_config, amp_enabled, amp_dtype, w
                 lat,
                 train_config["halo_weight"],
                 train_config["halo_radius"],
+                train_config.get("loss_mode", "global_plus_halo"),
             )
         totals += torch.tensor(
             [loss.item(), global_loss.item(), halo_loss.item(), 1.0],
@@ -171,25 +249,98 @@ def validate(model, loader, device, lat, train_config, amp_enabled, amp_dtype, w
     return tuple((totals[:3] / totals[3].clamp_min(1.0)).tolist())
 
 
-def save_checkpoint(path, model, optimizer, scheduler, epoch, step, best_val, config):
-    raw_model = model.module if isinstance(model, DDP) else model
+def save_checkpoints(
+    paths, model, optimizer, scheduler, epoch, step, best_val, config, rank
+):
+    """Collect one full CPU checkpoint and write it on rank 0.
+
+    All ranks must enter this function because FSDP state gathering is a
+    collective. The expensive gather is done once even when both last and best
+    checkpoints are written.
+    """
+    if isinstance(model, FSDP):
+        state_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        optim_config = FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"FSDP\.state_dict_type\(\) and FSDP\.set_state_dict_type\(\) are being deprecated\.",
+                category=FutureWarning,
+                module=r"torch\.distributed\.fsdp\.fully_sharded_data_parallel",
+            )
+            with FSDP.state_dict_type(
+                model, StateDictType.FULL_STATE_DICT, state_config, optim_config
+            ):
+                model_state = model.state_dict()
+                optimizer_state = FSDP.optim_state_dict(model, optimizer)
+    else:
+        model_state = model.state_dict()
+        optimizer_state = optimizer.state_dict()
+    if rank != 0:
+        return
     state = {
-        "model": raw_model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        "model": model_state,
+        "optimizer": optimizer_state,
         "scheduler": scheduler.state_dict(),
         "epoch": epoch,
         "step": step,
         "best_val": best_val,
         "config": config,
+        "distributed": "fsdp_full_shard" if isinstance(model, FSDP) else "none",
     }
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(state, temporary)
-    os.replace(temporary, path)
+    for value in paths:
+        path = Path(value)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        torch.save(state, temporary)
+        os.replace(temporary, path)
+
+
+def load_checkpoint(path, model, optimizer, scheduler, rank):
+    """Load a full checkpoint and distribute sharded model/optimizer state."""
+    if not isinstance(model, FSDP):
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        model.load_state_dict(checkpoint["model"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        return checkpoint
+
+    # FULL_STATE_DICT loading requires the full model state on EVERY rank.
+    # mmap avoids eagerly duplicating the multi-GB CPU checkpoint in each process;
+    # the local workers share the OS file cache. Optimizer state is still scattered.
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    metadata = [
+        None if checkpoint is None else {
+            key: checkpoint[key]
+            for key in ("epoch", "step", "best_val", "config", "scheduler")
+        }
+    ]
+    dist.broadcast_object_list(metadata, src=0)
+    metadata = metadata[0]
+    state_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"FSDP\.state_dict_type\(\) and FSDP\.set_state_dict_type\(\) are being deprecated\.",
+            category=FutureWarning,
+            module=r"torch\.distributed\.fsdp\.fully_sharded_data_parallel",
+        )
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, state_config):
+            # rank0_only controls exporting a state dict, NOT load-time broadcast.
+            model.load_state_dict(checkpoint["model"], strict=True)
+    sharded_optimizer = FSDP.scatter_full_optim_state_dict(
+        checkpoint["optimizer"] if rank == 0 else None,
+        model,
+        optim=optimizer,
+    )
+    optimizer.load_state_dict(sharded_optimizer)
+    scheduler.load_state_dict(metadata["scheduler"])
+    return metadata
 
 
 def main():
     args = parse_args()
+    if args.resume and args.pretrained_fuxi:
+        raise ValueError("--pretrained-fuxi initializes a new run; do not combine it with --resume")
     config = load_config(args.config)
     data_config = resolve_data_paths(args.config, config["data"])
     train_config = config["train"]
@@ -206,6 +357,12 @@ def main():
         return
 
     rank, _, world_size, device = setup_distributed()
+    fsdp_enabled = bool(train_config.get("fsdp", {}).get("enabled", True))
+    if fsdp_enabled and world_size < 2:
+        raise RuntimeError(
+            "FSDP training requires at least 2 GPUs; launch with torchrun "
+            "--nproc_per_node=4. Use --check-data for a single-process data check."
+        )
     seed_everything(train_config["seed"], rank)
     train_dataset = make_dataset(data_config, "train")
     val_dataset = make_dataset(data_config, "val")
@@ -239,10 +396,41 @@ def main():
     )
 
     model = DAForecastNet(**config["model"]).to(device)
-    if world_size > 1:
-        model = DDP(model, device_ids=[device.index], broadcast_buffers=False)
+    total_parameters = sum(parameter.numel() for parameter in model.parameters())
+    if args.pretrained_fuxi:
+        sync_states = bool(train_config.get("fsdp", {}).get("sync_module_states", True))
+        if fsdp_enabled and not sync_states:
+            raise ValueError("--pretrained-fuxi with FSDP requires sync_module_states=true")
+        # Only rank 0 reads the multi-GB checkpoint. FSDP broadcasts its
+        # initialized module state to other ranks during wrapping.
+        if rank == 0 or not fsdp_enabled:
+            loaded = load_fuxi_pretrained(model, args.pretrained_fuxi)
+            if rank == 0:
+                print(
+                    f"FuXi pretrained: {loaded['state_tensors']} state tensors, "
+                    f"{loaded['parameters']:,}/{loaded['total_parameters']:,} "
+                    f"parameters ({loaded['parameters'] / loaded['total_parameters']:.1%}); "
+                    "only OBS encoder and gated fusion remain newly initialized",
+                    flush=True,
+                )
+    if train_config.get("freeze_fuxi", False):
+        for module in (
+            model.era_encoder, model.time_embed, model.backbone, model.decoder
+        ):
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
+
+    trainable_parameters = [p for p in model.parameters() if p.requires_grad]
+    if not trainable_parameters:
+        raise ValueError(
+            "no trainable parameters: enable model.use_obs or set train.freeze_fuxi=false"
+        )
+    if fsdp_enabled:
+        model = wrap_fsdp(model, device, train_config)
+
+    opt_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        opt_params,
         lr=train_config["learning_rate"],
         weight_decay=train_config["weight_decay"],
     )
@@ -270,11 +458,18 @@ def main():
     start_epoch, optimizer_step, best_val = 0, 0, float("inf")
     resume_path = args.resume
     if resume_path:
-        checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
-        raw_model = model.module if isinstance(model, DDP) else model
-        raw_model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        scheduler.load_state_dict(checkpoint["scheduler"])
+        checkpoint = load_checkpoint(
+            resume_path, model, optimizer, scheduler, rank
+        )
+        saved_mode = checkpoint.get("config", {}).get("train", {}).get(
+            "loss_mode", "global_plus_halo"
+        )
+        current_mode = train_config.get("loss_mode", "global_plus_halo")
+        if saved_mode != current_mode:
+            raise ValueError(
+                f"checkpoint loss_mode={saved_mode!r}, but current config uses "
+                f"{current_mode!r}; start a new run instead of resuming"
+            )
         start_epoch = int(checkpoint["epoch"]) + 1
         optimizer_step = int(checkpoint["step"])
         best_val = float(checkpoint["best_val"])
@@ -284,12 +479,14 @@ def main():
         output_dir.mkdir(parents=True, exist_ok=True)
         with open(output_dir / "resolved_config.json", "w", encoding="utf-8") as handle:
             json.dump(config, handle, indent=2)
-        parameters = sum(parameter.numel() for parameter in model.parameters())
         effective_batch = (
             train_config["batch_size_per_gpu"] * world_size * accumulation
         )
-        print(f"parameters={parameters:,}, train={len(train_dataset)}, val={len(val_dataset)}")
-        print(f"world_size={world_size}, effective_batch={effective_batch}, device={device}")
+        print(f"parameters={total_parameters:,}, train={len(train_dataset)}, val={len(val_dataset)}")
+        print(
+            f"distributed={'FSDP FULL_SHARD' if fsdp_enabled else 'none'}, "
+            f"world_size={world_size}, effective_batch={effective_batch}, device={device}"
+        )
 
     lat = torch.as_tensor(
         train_dataset.dataset.lat if isinstance(train_dataset, Subset) else train_dataset.lat,
@@ -309,7 +506,7 @@ def main():
                 or batch_index + 1 == len(train_loader)
             )
             sync_context = (
-                nullcontext() if synchronize or not isinstance(model, DDP) else model.no_sync()
+                nullcontext() if synchronize or not isinstance(model, FSDP) else model.no_sync()
             )
             with sync_context:
                 with torch.autocast(
@@ -324,28 +521,31 @@ def main():
                         lat,
                         train_config["halo_weight"],
                         train_config["halo_radius"],
+                        train_config.get("loss_mode", "global_plus_halo"),
                     )
                     scaled_loss = loss / accumulation
                 scaler.scale(scaled_loss).backward()
 
             if synchronize:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), train_config["gradient_clip"])
+                if isinstance(model, FSDP):
+                    model.clip_grad_norm_(train_config["gradient_clip"])
+                else:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), train_config["gradient_clip"]
+                    )
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
                 scheduler.step()
                 optimizer_step += 1
-                if (
-                    rank == 0
-                    and optimizer_step % int(train_config.get("log_interval", 20)) == 0
-                ):
-                    print(
-                        f"epoch={epoch + 1} step={optimizer_step} "
-                        f"lr={optimizer.param_groups[0]['lr']:.3e} "
-                        f"batch_loss={loss.item():.6f}",
-                        flush=True,
-                    )
+
+                print(
+                    f"epoch={epoch + 1} step={optimizer_step} "
+                    f"lr={optimizer.param_groups[0]['lr']:.3e} "
+                    f"batch_loss={loss.item():.6f}",
+                    flush=True,
+                )
             running[0] += loss.detach().double()
             running[1] += 1
 
@@ -355,6 +555,9 @@ def main():
         val_loss, val_global, val_halo = validate(
             model, val_loader, device, lat, train_config, amp_enabled, amp_dtype, world_size
         )
+        improved = val_loss < best_val
+        if improved:
+            best_val = val_loss
         if rank == 0:
             elapsed = time.time() - epoch_start
             lr = optimizer.param_groups[0]["lr"]
@@ -365,18 +568,13 @@ def main():
                 f"seconds={elapsed:.1f}",
                 flush=True,
             )
-            improved = val_loss < best_val
-            if improved:
-                best_val = val_loss
-            save_checkpoint(
-                output_dir / "last.pt", model, optimizer, scheduler,
-                epoch, optimizer_step, best_val, config
-            )
-            if improved:
-                save_checkpoint(
-                    output_dir / "best.pt", model, optimizer, scheduler,
-                    epoch, optimizer_step, best_val, config
-                )
+        checkpoint_paths = [output_dir / "last.pt"]
+        if improved:
+            checkpoint_paths.append(output_dir / "best.pt")
+        save_checkpoints(
+            checkpoint_paths, model, optimizer, scheduler,
+            epoch, optimizer_step, best_val, config, rank,
+        )
         if world_size > 1:
             dist.barrier()
 

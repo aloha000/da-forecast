@@ -464,6 +464,7 @@ class SwinBlock(nn.Module):
         self.num_heads = num_heads
         self.window_size = list(to_2tuple(window_size))
         self.shift_size = list(to_2tuple(shift_size))
+        self.mask_type = mask_type
         self.mlp_ratio = mlp_ratio
 
         if self.input_size[0] <= self.window_size[0]:

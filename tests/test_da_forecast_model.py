@@ -46,6 +46,7 @@ class DAForecastModelTest(unittest.TestCase):
         output.square().mean().backward()
         groups = {
             "era_encoder": model.era_encoder,
+            "time_embed": model.time_embed,
             "obs_encoder": model.obs_encoder,
             "high_fusion": model.high_fusion,
             "backbone": model.backbone,
@@ -70,7 +71,7 @@ class DAForecastModelTest(unittest.TestCase):
         self.assertEqual(output.shape, (1, 4, 40, 40))
         output.mean().backward()
         self.assertIsNone(model.obs_encoder)
-        self.assertIsNotNone(model.era_encoder.field_patch.weight.grad)
+        self.assertIsNotNone(model.era_encoder.patch_embed.proj.weight.grad)
 
     def test_all_missing_observations_are_finite_and_neutral(self):
         torch.manual_seed(1)
@@ -91,9 +92,9 @@ class DAForecastModelTest(unittest.TestCase):
             fusion.gate.mean(), expected, rtol=1e-5, atol=1e-7
         )
 
-    def test_regional_model_contains_no_periodic_convolution(self):
+    def test_global_decoder_uses_periodic_convolution(self):
         model = make_model(use_obs=True)
-        self.assertFalse(
+        self.assertTrue(
             any(isinstance(module, PeriodicConv2d) for module in model.modules())
         )
 
@@ -101,11 +102,21 @@ class DAForecastModelTest(unittest.TestCase):
         # (The later GroupNorm intentionally uses whole-domain statistics, so
         # testing the fully normalized feature map would not be a locality test.)
         encoder = ERA5Encoder(1, 1, 1, embed_dim=32, patch_size=4).eval()
-        fields = torch.zeros(1, 1, 40, 40)
-        baseline = encoder.field_patch(fields)
+        fields = torch.zeros(1, 2, 40, 40)
+        baseline = encoder.patch_embed.proj(fields)
         fields[..., 20, 0] = 1.0
-        impulse = encoder.field_patch(fields)
+        impulse = encoder.patch_embed.proj(fields)
         torch.testing.assert_close(impulse[..., -1], baseline[..., -1])
+
+    def test_fuxi_backbone_and_decoder_structure(self):
+        model = make_model(use_obs=True)
+        self.assertEqual(len(model.backbone.layers), 1)
+        self.assertIsInstance(model.backbone.fpn[0], torch.nn.Linear)
+        self.assertIsInstance(model.era_encoder.patch_embed, torch.nn.Module)
+        self.assertIsInstance(model.era_encoder.down_block, torch.nn.Module)
+        self.assertIsInstance(model.decoder.up_block, torch.nn.Module)
+        self.assertIsInstance(model.decoder.head, torch.nn.Linear)
+        self.assertEqual(model.backbone.layers[0].blocks[0].mask_type, "h")
 
     def test_invalid_window_fails_early(self):
         with self.assertRaisesRegex(ValueError, "must be divisible"):

@@ -41,8 +41,8 @@
 ## 3. 推荐的总体结构
 
 ```text
-ERA5(t-6h, t)                         GNSS ZTD(t-45min ... t)
-[B,2,70,80,120]                       [B,10,1,80,120]
+ERA5(t-6h, t)                         GNSS ZTD(t-6h ... t, every 20 min)
+[B,2,70,80,120]                       [B,19,1,80,120]
        |                                       |
 ERA5 Encoder                              Obs Encoder
        |                                       |
@@ -80,7 +80,9 @@ image_size = (80, 120)
 era_chans = 70
 era_frames = 2
 obs_chans = 1
-obs_frames = 10
+obs_history_hours = 6
+obs_interval_minutes = 20
+obs_frames = 19  # includes both t-6h and t
 out_chans = 70
 
 embed_dim = 256
@@ -147,8 +149,8 @@ ZTD值 + 有效性mask
 推荐输入：
 
 ```python
-obs.shape      == [B, 10, 1, 80, 120]
-obs_mask.shape == [B, 10, 1, 80, 120]
+obs.shape      == [B, 19, 1, 80, 120]
+obs_mask.shape == [B, 19, 1, 80, 120]
 ```
 
 还可以加入：
