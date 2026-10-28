@@ -8,8 +8,8 @@
     "mean_std_dir": "/inspire/ssd/project/sais-weather/public/fuxi-obs/obs-grid-qc_new/mean_std",
     "obs_history_hours": 6,
     "obs_interval_minutes": 20,
-    "train_split": ["2023-01-01T00:00:00", "2024-05-01T00:00:00"],
-    "val_split": ["2024-05-01T00:00:00", "2025-01-01T00:00:00"],
+    "train_split": ["2023-01-01T00:00:00", "2025-01-01T00:00:00"],
+    "val_split": ["2025-01-01T00:00:00", "2026-01-01T00:00:00"],
     "test_split": ["2025-01-01T00:00:00", "2026-01-01T00:00:00"]
   },
   "model": {
@@ -31,7 +31,7 @@
   "train": {
     "seed": 2000,
     "epochs": 40,
-    "batch_size_per_gpu": 4,
+    "batch_size_per_gpu": 2,
     "gradient_accumulation": 4,
     "num_workers": 4,
     "learning_rate": 0.0002,
@@ -45,7 +45,7 @@
     "halo_weight": 0.5,
     "halo_radius": 3,
     "amp": "bf16",
-    "output_dir": "work_dirs/da_forecast_global_6h_fsdp_train-obs",
+    "output_dir": "work_dirs/da_forecast_global_6h_fsdp_train_obs-bs2-train3yrs",
     "fsdp": {
       "enabled": true,
       "sync_module_states": true,

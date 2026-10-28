@@ -1,5 +1,10 @@
 # da-forecast
 
+第一次阅读项目，建议先看中文
+[代码导读：从一个样本到一次训练更新](CODE_WALKTHROUGH.md)。
+其中解释数据、网络、FSDP、loss、checkpoint、评估和已知注意事项，
+并区分当前配置与历史实验参数。下文部分启动示例保留历史目录，请核对实际配置后使用。
+
 当前模型的完整逐层结构见
 [CURRENT_NETWORK_ARCHITECTURE.md](CURRENT_NETWORK_ARCHITECTURE.md)。
 
@@ -133,6 +138,7 @@ nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run \
   --nproc_per_node=4 \
   train.py \
   --config configs/train_da_forecast.json \
+  --pretrained-fuxi model/fuxi_short.pth  \
   > work_dirs/da_forecast_global_6h_fsdp/train.log 2>&1 &
 ```
 

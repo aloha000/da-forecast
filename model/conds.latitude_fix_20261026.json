@@ -1,0 +1,99 @@
+{
+  "timestamp_utc": "2026-10-26T08:14:07.405579+00:00",
+  "target": "/inspire/ssd/project/sais-weather/public/linan/da-forecast/model/conds.npy",
+  "backup": "/inspire/ssd/project/sais-weather/public/linan/da-forecast/model/conds.south_to_north_backup_20261026.npy",
+  "operation": "reverse latitude axis (axis=1) of all five channels; south-to-north -> north-to-south",
+  "shape": [
+    5,
+    720,
+    1440
+  ],
+  "dtype": "float32",
+  "sha256_before": "60fca81c85246c75a4d2a60cec70418bc2e4140eb7eba101ea3dd5e042a6c1a3",
+  "sha256_after": "bdc5096c26ae4d3948987d42a6a284bc6b52b518f3c28cd1eb8a41950ec34191",
+  "before": {
+    "Berlin": {
+      "row": 150,
+      "col": 54,
+      "latitude": 52.4477424621582,
+      "longitude": 13.5,
+      "land_mask": 0.0,
+      "terrain": -0.44363775849342346
+    },
+    "Tibet": {
+      "row": 232,
+      "col": 340,
+      "latitude": 31.919269561767578,
+      "longitude": 85.0,
+      "land_mask": 0.0,
+      "terrain": -0.4440552294254303
+    },
+    "Antarctica": {
+      "row": 699,
+      "col": 0,
+      "latitude": -84.99288940429688,
+      "longitude": 0.0,
+      "land_mask": 0.0,
+      "terrain": -0.4443475902080536
+    },
+    "Arctic": {
+      "row": 0,
+      "col": 0,
+      "latitude": 89.99982452392578,
+      "longitude": 0.0,
+      "land_mask": 1.0,
+      "terrain": 2.8021748065948486
+    },
+    "Pacific": {
+      "row": 359,
+      "col": 840,
+      "latitude": 0.12517547607421875,
+      "longitude": 210.0,
+      "land_mask": 0.0,
+      "terrain": -0.4434780776500702
+    }
+  },
+  "after": {
+    "Berlin": {
+      "row": 150,
+      "col": 54,
+      "latitude": 52.4477424621582,
+      "longitude": 13.5,
+      "land_mask": 0.9559276103973389,
+      "terrain": -0.39432719349861145
+    },
+    "Tibet": {
+      "row": 232,
+      "col": 340,
+      "latitude": 31.919269561767578,
+      "longitude": 85.0,
+      "land_mask": 0.9999898076057434,
+      "terrain": 5.152900695800781
+    },
+    "Antarctica": {
+      "row": 699,
+      "col": 0,
+      "latitude": -84.99288940429688,
+      "longitude": 0.0,
+      "land_mask": 1.0,
+      "terrain": 2.555767059326172
+    },
+    "Arctic": {
+      "row": 0,
+      "col": 0,
+      "latitude": 89.99982452392578,
+      "longitude": 0.0,
+      "land_mask": 0.0,
+      "terrain": -0.4436279237270355
+    },
+    "Pacific": {
+      "row": 359,
+      "col": 840,
+      "latitude": 0.12517547607421875,
+      "longitude": 210.0,
+      "land_mask": 0.0,
+      "terrain": -0.44367286562919617
+    }
+  },
+  "note": "Reader code and coordinate files unchanged. Existing checkpoints were not retrained. For historical-input reproduction, explicitly select the backup static-field file."
+}
