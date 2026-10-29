@@ -329,6 +329,7 @@ class DAForecastNet(nn.Module):
         mlp_ratio: float = 4.0,
         time_dim: int = 12,
         use_obs: bool = True,
+        zero_ztd: bool = False
     ) -> None:
         super().__init__()
         _check_feature_width(embed_dim, num_heads)
@@ -342,6 +343,7 @@ class DAForecastNet(nn.Module):
         self.out_channels = out_channels
         self.patch_size = patch_size
         self.use_obs = use_obs
+        self.zero_ztd = zero_ztd
 
         scale = patch_size * 2
         if any(v % scale != 0 for v in self.image_size):
@@ -401,6 +403,9 @@ class DAForecastNet(nn.Module):
                 raise ValueError(
                     "obs_ztd, obs_mask and obs_static are required when use_obs=True"
                 )
+            if self.zero_ztd:
+                obs_mask = ((obs_mask > 0) & torch.isfinite(obs_ztd)).to(dtype=obs_mask.dtype)
+                obs_ztd = torch.zeros_like(obs_ztd)
             assert self.obs_encoder is not None
             assert self.high_fusion is not None and self.low_fusion is not None
             obs_high, obs_low, high_mask, low_mask = self.obs_encoder(
