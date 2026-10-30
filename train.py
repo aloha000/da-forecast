@@ -44,6 +44,7 @@ def parse_args():
                         help="initialize FuXi forecast core before FSDP wrapping")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--init-checkpoint",default=None,help="initilize the full forecast model; do not restore optimizer or scheduler")
     return parser.parse_args()
 
 
@@ -339,8 +340,13 @@ def load_checkpoint(path, model, optimizer, scheduler, rank):
 
 def main():
     args = parse_args()
-    if args.resume and args.pretrained_fuxi:
-        raise ValueError("--pretrained-fuxi initializes a new run; do not combine it with --resume")
+    load_options = (
+        args.resume,
+        args.pretrained_fuxi,
+        args.init_checkpoint
+    )
+    if sum(value is not None for value in load_options) > 1:
+        raise ValueError("--resume,--pretrained-fuxi and --init-checkpoint can not be used together")
     config = load_config(args.config)
     data_config = resolve_data_paths(args.config, config["data"])
     train_config = config["train"]
@@ -413,12 +419,42 @@ def main():
                     "only OBS encoder and gated fusion remain newly initialized",
                     flush=True,
                 )
+    if args.init_checkpoint:
+        sync_states = bool(train_config.get("fsdp",{}).get("sync_module_states",True))
+        if fsdp_enabled and not sync_states:
+            raise ValueError("--init-checkpoint with fsdp requires sync_module_states=true")
+        if rank==0 or not fsdp_enabled:
+            checkpoint = torch.load(args.init_checkpoint,
+                                    map_location="cpu",
+                                    weights_only=False,
+                                    mmap=True)
+            saved_model_config = checkpoint["config"]["model"]
+            for key, default in (("use_obs",True),("zero_ztd",False)):
+                saved_value = saved_model_config.get(key,default)
+                current_value = config["model"].get(key,default)
+                if saved_value!=current_value:
+                    raise ValueError(f"{key} mismatch: checkpoint={saved_value}, current config={current_value}")
+            model.load_state_dict(checkpoint["model"],strict=True)
+            print(f"Initialized full Forecast model from {args.init_checkpoint};"
+                  "optimizer,scheduler and training counters start fresh",flush=True)
+            del checkpoint
+            
+            
     if train_config.get("freeze_fuxi", False):
         for module in (
             model.era_encoder, model.time_embed, model.backbone, model.decoder
         ):
             for parameter in module.parameters():
                 parameter.requires_grad_(False)
+    if train_config.get("freeze_obs",False):
+        for module in (
+            model.obs_encoder,
+            model.high_fusion,
+            model.low_fusion,
+        ):
+            if module is not None:
+                for parameter in module.parameters():
+                    parameter.requires_grad_(False)
 
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
     if not trainable_parameters:

@@ -55,7 +55,7 @@ ANIMATION_VARIABLES = (
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_da_forecast.json")
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint")
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument(
         "--output-dir", default="work_dirs/da_forecast_6h_40epoch_halo_only/test"
@@ -70,7 +70,20 @@ def parse_args():
     parser.add_argument("--animation-end", default="2025-05-05T23:59:59")
     parser.add_argument("--animation-fps", type=int, default=2)
     parser.add_argument("--skip-animations", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--skip-mae-plots", action="store_true",
+                        help="do not generate per-channel MAE comparison PNGs")
+    parser.add_argument("--fuxi-reference", type=Path, default="work_dirs/da_forecast_global_6h_fsdp_train_obs/comparison_fuxi_corrected_conds_bf16_20261026/channel_comparison.csv",
+                        help="original FuXi channel_comparison.csv with sibling summary.json")
+    parser.add_argument("--plot-only", action="store_true",
+                        help="plot existing CSV metrics in --output-dir; no inference")
+    args = parser.parse_args()
+    if not args.plot_only and not args.checkpoint:
+        parser.error("--checkpoint is required unless --plot-only is used")
+    if args.plot_only and args.skip_mae_plots:
+        parser.error("--plot-only and --skip-mae-plots cannot be combined")
+    if args.plot_only and args.fuxi_reference is None:
+        parser.error("--plot-only requires --fuxi-reference")
+    return args
 
 
 class DistributedEvalSampler(Sampler):
@@ -378,8 +391,210 @@ def write_metrics(
     return summary
 
 
+def read_channel_mae_rows(output_dir):
+    """Read existing metrics in model channel order, never assume CSV row order."""
+    path = Path(output_dir) / "weighted_mae_by_channel.csv"
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    by_channel = {row["channel"]: row for row in rows}
+    if len(rows) != len(by_channel) or set(by_channel) != set(CHANNELS):
+        raise ValueError(f"{path} must contain each of the 70 channels exactly once")
+    ordered = [by_channel[channel] for channel in CHANNELS]
+    for row in ordered:
+        for region in ("global", "halo"):
+            for scale in ("normalized", "physical"):
+                for method in ("weighted", "persistence"):
+                    key = f"{region}_{method}_mae_{scale}"
+                    value = float(row[key])
+                    if np.isinf(value) or value < 0:
+                        raise ValueError(f"invalid {key} for {row['channel']}: {value}")
+                    row[key] = value
+    return ordered
+
+
+def read_fuxi_comparison(output_dir, reference_csv):
+    """Join global metrics by channel; reject incompatible cached baselines.
+
+    Persistence agreement is a useful data/normalization consistency check,
+    not proof that every historical model input was identical.
+    """
+    output_dir = Path(output_dir)
+    rows = read_channel_mae_rows(output_dir)
+    reference_csv = Path(reference_csv)
+    with reference_csv.open(encoding="utf-8-sig", newline="") as handle:
+        reference = list(csv.DictReader(handle))
+    indexed = {r["channel"]: r for r in reference}
+    if len(indexed) != len(reference) or set(indexed) != set(CHANNELS):
+        raise ValueError("FuXi reference must contain each of the 70 channels exactly once")
+    model_summary = json.loads((output_dir / "weighted_mae_summary.json").read_text())
+    ref_summary = json.loads((reference_csv.parent / "summary.json").read_text())
+    if (not ref_summary.get("is_full_test")
+            or ref_summary["samples"] != model_summary["samples"]):
+        raise ValueError("FuXi reference must cover the same full test set; pilot/subset is not valid")
+    evaluation = model_summary.get("evaluation", {})
+    if evaluation.get("split") != "test" or "test_split" not in model_summary:
+        raise ValueError("this FuXi reference comparison requires test-split metrics")
+    # write_metrics stores [first analysis time, last analysis time + 6h].
+    first = pd.Timestamp(model_summary["test_split"][0]) + pd.Timedelta(hours=6)
+    last = pd.Timestamp(model_summary["test_split"][1])
+    if (first != pd.Timestamp(ref_summary["valid_time_first"])
+            or last != pd.Timestamp(ref_summary["valid_time_last"])):
+        raise ValueError("FuXi reference valid-time range differs from model evaluation")
+    if evaluation.get("amp") != ref_summary.get("amp"):
+        raise ValueError("FuXi reference precision differs from model evaluation")
+    joined = []
+    for row in rows:
+        ref = indexed[row["channel"]]
+        if ref["unit"] != row["unit"]:
+            raise ValueError(f"physical unit mismatch: {row['channel']}")
+        item = {"channel": row["channel"], "unit": row["unit"]}
+        for scale in ("normalized", "physical"):
+            model = row[f"global_weighted_mae_{scale}"]
+            original = float(ref[f"original_mae_{scale}"])
+            if not np.isfinite(original) or original < 0:
+                raise ValueError(f"invalid original FuXi MAE for {row['channel']}")
+            if not np.isclose(float(ref[f"persistence_mae_{scale}"]),
+                              row[f"global_persistence_mae_{scale}"],
+                              rtol=1e-5, atol=1e-8):
+                raise ValueError(f"persistence consistency check failed: {row['channel']} {scale}")
+            item.update({f"original_mae_{scale}": original,
+                         f"da_mae_{scale}": model,
+                         f"da_minus_original_{scale}": model - original,
+                         f"da_improvement_percent_{scale}":
+                             100 * (original - model) / original if original > 0 else float("nan")})
+        joined.append(item)
+    return joined, model_summary, ref_summary
+
+
+def plot_channel_mae_comparison(output_dir, reference_csv):
+    """Compare DA against cached original fuxi_short.pth GLOBAL forecasts.
+
+    No FuXi inference is run here. The reference has no halo metrics, so no
+    halo comparison is manufactured. Physical TP uses evaluated nonlinear MAE.
+    """
+    output_dir = Path(output_dir)
+    rows, model_summary, ref_summary = read_fuxi_comparison(output_dir, reference_csv)
+    groups = [
+        ("Geopotential height", list(range(0, 13))),
+        ("Temperature", list(range(13, 26))),
+        ("Zonal wind", list(range(26, 39))),
+        ("Meridional wind", list(range(39, 52))),
+        ("Relative humidity", list(range(52, 65))),
+        ("2 m temperature", [65]),
+        ("10 m wind components", [66, 67]),
+        ("Mean sea-level pressure", [68]),
+        ("Total precipitation", [69]),
+    ]
+    paths = []
+
+    def bars(ax, indices, scale):
+        selected = [rows[index] for index in indices]
+        x = np.arange(len(selected))
+        ax.bar(x - .2, [r[f"da_mae_{scale}"] for r in selected],
+               width=.4, color="#2563eb", label="DA-Forecast")
+        ax.bar(x + .2, [r[f"original_mae_{scale}"] for r in selected],
+               width=.4, color="#e87924", label="Original FuXi (fuxi_short.pth)")
+        ax.set_xticks(x)
+        ax.set_xticklabels([r["channel"] for r in selected], rotation=60,
+                           ha="right", fontsize=9)
+        ax.set_ylim(bottom=0)
+        ax.grid(axis="y", alpha=.22)
+        ax.set_axisbelow(True)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+
+    for region, title in (("global", "Global"),):
+        for scale in ("normalized", "physical"):
+            if scale == "normalized":
+                fig, axes = plt.subplots(2, 1, figsize=(19, 9), sharey=True)
+                for ax, indices in zip(axes, (range(35), range(35, 70))):
+                    bars(ax, indices, scale)
+                    ax.set_ylabel("Latitude-weighted MAE (normalized)")
+                # Explicit shared limits: set_ylim in the first panel disables
+                # autoscaling, otherwise taller bars in panel two get clipped.
+                values = [r[f"{method}_mae_{scale}"] for r in rows
+                          for method in ("da", "original")]
+                ymax = max(v for v in values if np.isfinite(v))
+                axes[0].set_ylim(0, max(ymax * 1.12, 1e-8))
+            else:
+                fig, axes = plt.subplots(3, 3, figsize=(19, 13))
+                for ax, (group_title, indices) in zip(axes.flat, groups):
+                    units = {rows[index]["unit"] for index in indices}
+                    if len(units) != 1:
+                        plt.close(fig)
+                        raise ValueError(f"inconsistent physical units in {group_title}")
+                    bars(ax, indices, scale)
+                    ax.set_title(group_title)
+                    ax.set_ylabel(f"MAE ({next(iter(units))})")
+            try:
+                handles, labels = axes.flat[0].get_legend_handles_labels()
+                fig.legend(handles, labels, loc="upper center", ncol=2,
+                           bbox_to_anchor=(.5, .956), frameon=False)
+                fig.suptitle(f"{title}: 6 h forecast per-channel MAE | {scale}",
+                             fontsize=17, y=.99)
+                fig.text(.5, .012,
+                         f"{model_summary['samples']} test samples | {ref_summary['amp']} | "
+                         f"{ref_summary['valid_time_first']} to {ref_summary['valid_time_last']} | "
+                         "Lower is better. Missing MAE values are not plotted.",
+                         ha="center", fontsize=10)
+                fig.tight_layout(rect=(0, .04, 1, .91))
+                path = output_dir / f"mae_vs_fuxi_{scale}.png"
+                fig.savefig(path, dpi=180, facecolor="white")
+                paths.append(path)
+                print(f"saved {path}", flush=True)
+            finally:
+                plt.close(fig)
+    fig, ax = plt.subplots(figsize=(13, 18))
+    try:
+        improvements = np.asarray([r["da_improvement_percent_normalized"] for r in rows])
+        ax.barh(np.arange(70), improvements,
+                color=np.where(improvements >= 0, "#159570", "#dc4949"))
+        ax.set_yticks(np.arange(70), CHANNELS, fontsize=9)
+        ax.invert_yaxis()
+        ax.axvline(0, color="black", linewidth=.8)
+        ax.set_xlabel("(FuXi MAE - DA MAE) / FuXi MAE (%) | normalized | positive = DA better")
+        ax.set_title("Global +6h forecast: DA improvement over original FuXi")
+        ax.grid(axis="x", alpha=.2)
+        ax.set_axisbelow(True)
+        fig.tight_layout()
+        path = output_dir / "mae_vs_fuxi_improvement.png"
+        fig.savefig(path, dpi=180, facecolor="white")
+        paths.append(path)
+        print(f"saved {path}", flush=True)
+    finally:
+        plt.close(fig)
+    with (output_dir / "channel_comparison_vs_fuxi.csv").open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    original = ref_summary["original_global_latitude_weighted_mae_normalized"]
+    model = model_summary["global_latitude_weighted_mae_normalized"]
+    comparison = {
+        "fuxi_reference_csv": str(Path(reference_csv).resolve()),
+        "model_metrics_csv": str((output_dir / "weighted_mae_by_channel.csv").resolve()),
+        "model_evaluation": model_summary.get("evaluation"),
+        "samples": model_summary["samples"], "region": "global",
+        "original_mae_normalized": original, "da_mae_normalized": model,
+        "improvement_percent": 100 * (original - model) / original if original > 0 else None,
+        "improved_channels": sum(r["da_mae_normalized"] < r["original_mae_normalized"] for r in rows),
+        "worse_channels": sum(r["da_mae_normalized"] > r["original_mae_normalized"] for r in rows),
+        "checks": "full sample count, valid-time endpoints, precision, units and per-channel persistence agreement",
+        "note": "Cached FuXi reference; no new FuXi inference. Historical input hashes are not available in the DA summary, so full input identity is not verified.",
+    }
+    with (output_dir / "comparison_vs_fuxi_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(comparison, handle, indent=2, ensure_ascii=False)
+    print(json.dumps(comparison, indent=2), flush=True)
+    return paths
+
+
 def main():
     args = parse_args()
+    if args.plot_only:
+        # Support accidental torchrun launch without duplicate plot writers.
+        if int(os.environ.get("RANK", "0")) == 0:
+            plot_channel_mae_comparison(args.output_dir, args.fuxi_reference)
+        return
     config = load_config(args.config)
     data_config = resolve_data_paths(args.config, config["data"])
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
@@ -599,6 +814,11 @@ def main():
             loss_mode, halo_weight, halo_radius, provenance=provenance
         )
         print(json.dumps(summary, indent=2, ensure_ascii=False))
+        if not args.skip_mae_plots:
+            if args.fuxi_reference is not None:
+                plot_channel_mae_comparison(output_dir, args.fuxi_reference)
+            else:
+                print("FuXi MAE plots skipped: supply --fuxi-reference channel_comparison.csv", flush=True)
 
     if rank == 0 and not args.skip_animations:
         animation_dir = output_dir / "animations"
