@@ -15,6 +15,12 @@ from evaluate import (
 
 
 class ChannelMAEPlotTest(unittest.TestCase):
+    def test_no_implicit_reference_or_historical_output(self):
+        with patch("sys.argv", ["evaluate.py", "--checkpoint", "/tmp/new_run/best.pt"]):
+            args = parse_args()
+        self.assertIsNone(args.fuxi_reference)
+        self.assertEqual(args.output_dir, "/tmp/new_run/test")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

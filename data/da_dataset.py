@@ -163,6 +163,7 @@ class DAForecastDataset(Dataset):
         obs_interval_minutes: int = 20,
     ) -> None:
         super().__init__()
+        self.lead_hours = 6
         self.era5_path = str(Path(era5_path))
         self.ztd_path = str(Path(ztd_path))
         self.obs_offsets = observation_offsets(
@@ -208,14 +209,14 @@ class DAForecastDataset(Dataset):
         self.lon = target_lon.astype(np.float32)
 
         start, end = pd.Timestamp(split[0]), pd.Timestamp(split[1])
-        lead = pd.Timedelta(hours=6)
+        lead = pd.Timedelta(hours=self.lead_hours)
         candidates = []
         for timestamp in self.label_times:
             # Target remains inside the half-open split. Historical input may
             # precede the validation/test boundary, which is valid at inference.
             if timestamp < start or timestamp + lead >= end:
                 continue
-            if (timestamp - lead).value not in self.label_lookup:
+            if (timestamp - pd.Timedelta(hours=6)).value not in self.label_lookup:
                 continue
             if (timestamp + lead).value not in self.label_lookup:
                 continue
@@ -255,22 +256,24 @@ class DAForecastDataset(Dataset):
             return None
         return indices
 
-    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+    def _read_era(self, timestamp):
         self._open()
-        timestamp = self.analysis_times[index]
         before = self.label_lookup[(timestamp - pd.Timedelta(hours=6)).value]
         current = self.label_lookup[timestamp.value]
-        target_index = self.label_lookup[(timestamp + pd.Timedelta(hours=6)).value]
+        target_index = self.label_lookup[(timestamp + pd.Timedelta(hours=self.lead_hours)).value]
 
         era_array = self._era_group["z"]
-        if (current, target_index) != (before + 1, before + 2):
+        if (current, target_index) != (before + 1, before + 1 + self.lead_hours // 6):
             raise RuntimeError("ERA5 time axis is not contiguous at 6-hour intervals")
         triplet = np.asarray(era_array[before:target_index + 1], dtype=np.float32)
-        era_before, era_current, target_raw = triplet
-        era5 = np.stack((era_before, era_current))
+        era5, target_raw = triplet[:2], triplet[2]
         target_valid = np.isfinite(target_raw)
         era5 = np.nan_to_num(era5, nan=0.0, posinf=0.0, neginf=0.0)
         target = np.nan_to_num(target_raw, nan=0.0, posinf=0.0, neginf=0.0)
+        return era5, target, target_valid
+
+    def _read_observations(self, timestamp):
+        self._open()
 
         obs_indices = self._obs_indices(timestamp)
         if obs_indices is None:
@@ -288,6 +291,12 @@ class DAForecastDataset(Dataset):
             obs_raw, self.obs_source_lat, self.obs_source_lon,
             self.obs_target_flat, (len(self.lat), len(self.lon)),
         )
+        return obs, obs_valid
+
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+        timestamp = self.analysis_times[index]
+        era5, target, target_valid = self._read_era(timestamp)
+        obs, obs_valid = self._read_observations(timestamp)
 
         return {
             "era5": torch.from_numpy(era5),

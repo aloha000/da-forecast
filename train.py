@@ -29,9 +29,12 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.utils.data import DataLoader, DistributedSampler, Subset
 
 from data import DAForecastDataset
+from data.rollout_identity import data_identity, file_identity
+from data.rollout_fields import RolloutFieldsDataset, source_observation_policy
 from model import DAForecastNet
 from model.fuxi import SwinBlock
 from model.fuxi_pretrained import load_fuxi_pretrained
+from model.rollout_init import load_fuxi_core_from_da
 
 
 def parse_args():
@@ -44,7 +47,10 @@ def parse_args():
                         help="initialize FuXi forecast core before FSDP wrapping")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--init-checkpoint",default=None,help="initilize the full forecast model; do not restore optimizer or scheduler")
+    parser.add_argument("--init-checkpoint", default=None,
+                        help="initialize model weights; start optimizer and scheduler fresh")
+    parser.add_argument("--init-fuxi-only", action="store_true",
+                        help="with --init-checkpoint: strictly load core, discard only OBS/fusion keys")
     return parser.parse_args()
 
 
@@ -84,11 +90,27 @@ def resolve_data_paths(config_path: str, data_config: dict):
     for key in ("era5_path", "ztd_path", "conds_path", "global_lat_path", "global_lon_path"):
         value = Path(result[key])
         result[key] = str(value if value.is_absolute() else root / value)
+    for key in ("mean_std_dir", "rollout_zarr", "rollout_source_checkpoint"):
+        if key in result:
+            value = Path(result[key])
+            result[key] = str(value if value.is_absolute() else root / value)
     return result
 
 
 def make_dataset(data_config: dict, split_name: str):
-    return DAForecastDataset(
+    if data_config.get("rollout_zarr"):
+        if int(data_config.get("forecast_lead_hours", 6)) != 12:
+            raise ValueError("rollout_zarr requires forecast_lead_hours=12")
+        dataset = RolloutFieldsDataset(
+            data_config["rollout_zarr"], split_name, data_config[f"{split_name}_split"],
+            file_identity(data_config["rollout_source_checkpoint"]),
+        )
+        if dataset.rollout_identity["data"] != data_identity(data_config):
+            raise ValueError("rollout source configuration/static/normalization fingerprint mismatch")
+        if dataset.source_observations != source_observation_policy(data_config):
+            raise ValueError("rollout source observation policy differs from config")
+        return dataset
+    kwargs = dict(
         era5_path=data_config["era5_path"],
         ztd_path=data_config["ztd_path"],
         split=data_config[f"{split_name}_split"],
@@ -98,6 +120,10 @@ def make_dataset(data_config: dict, split_name: str):
         obs_history_hours=data_config["obs_history_hours"],
         obs_interval_minutes=data_config["obs_interval_minutes"],
     )
+    lead = int(data_config.get("forecast_lead_hours", 6))
+    if lead != 6:
+        raise ValueError("12h training/evaluation requires data.rollout_zarr; direct truth inputs are forbidden")
+    return DAForecastDataset(**kwargs)
 
 
 def print_data_check(train_dataset, val_dataset):
@@ -112,6 +138,11 @@ def print_data_check(train_dataset, val_dataset):
     valid = sample["obs_mask"].sum().item()
     total = sample["obs_mask"].numel()
     print(f"observed ZTD cells: {int(valid)}/{total} ({100.0 * valid / total:.2f}%)")
+    if train_dataset.lead_hours == 12:
+        print("alignment: [ERA5(T), fixed prediction(T+6)] -> ERA5(T+12); "
+              "time_features(T+6); persistence=ERA5(T)")
+        print("OBS branch removed; source forecast used real OBS at T")
+        return
     print(
         "alignment: ERA5(t-6h,t) + "
         f"ZTD(t-{train_dataset.obs_history_hours}h..t every "
@@ -338,6 +369,28 @@ def load_checkpoint(path, model, optimizer, scheduler, rank):
     return metadata
 
 
+def apply_freeze_policy(model, train_config):
+    """Apply phase policy before FSDP/optimizer; never detach fusion outputs."""
+    for name in ("era_encoder", "time_embed", "backbone", "decoder"):
+        getattr(model, name).requires_grad_(not train_config.get("freeze_fuxi", False))
+    for name in ("obs_encoder", "high_fusion", "low_fusion"):
+        module = getattr(model, name)
+        if module is not None:
+            module.requires_grad_(not train_config.get("freeze_obs", False))
+
+
+def initialize_model_weights(model, checkpoint, model_config, fuxi_only=False):
+    """A stage transition loads weights only, with strictly checked core keys."""
+    if fuxi_only:
+        return load_fuxi_core_from_da(model, checkpoint["model"])
+    saved_config = checkpoint["config"]["model"]
+    for key, default in (("use_obs", True), ("zero_ztd", False)):
+        if saved_config.get(key, default) != model_config.get(key, default):
+            raise ValueError(f"{key} mismatch between checkpoint and model config")
+    model.load_state_dict(checkpoint["model"], strict=True)
+    return {"loaded_tensors": len(checkpoint["model"]), "discarded_obs_tensors": 0}
+
+
 def main():
     args = parse_args()
     load_options = (
@@ -350,6 +403,11 @@ def main():
     config = load_config(args.config)
     data_config = resolve_data_paths(args.config, config["data"])
     train_config = config["train"]
+    if args.init_fuxi_only and (not args.init_checkpoint or config["model"].get("use_obs", True)):
+        raise ValueError("--init-fuxi-only requires --init-checkpoint and model.use_obs=false")
+    if data_config.get("rollout_zarr"):
+        if config["model"].get("use_obs", True) or train_config.get("freeze_fuxi", False):
+            raise ValueError("rollout_zarr requires use_obs=false and freeze_fuxi=false")
     if args.output_dir:
         train_config["output_dir"] = args.output_dir
     if args.epochs is not None:
@@ -362,8 +420,16 @@ def main():
         print_data_check(train_dataset, val_dataset)
         return
 
+    if int(data_config.get("forecast_lead_hours", 6)) == 12:
+        if not data_config.get("rollout_zarr"):
+            raise ValueError("12h training requires data.rollout_zarr")
+        if not args.init_checkpoint and not args.resume:
+            raise ValueError("12h training requires --init-checkpoint (new stage) or --resume")
+
     rank, _, world_size, device = setup_distributed()
     fsdp_enabled = bool(train_config.get("fsdp", {}).get("enabled", True))
+    if world_size > 1 and not fsdp_enabled:
+        raise ValueError("multi-process training requires FSDP; independent unsynchronized models are not supported")
     if fsdp_enabled and world_size < 2:
         raise RuntimeError(
             "FSDP training requires at least 2 GPUs; launch with torchrun "
@@ -372,6 +438,8 @@ def main():
     seed_everything(train_config["seed"], rank)
     train_dataset = make_dataset(data_config, "train")
     val_dataset = make_dataset(data_config, "val")
+    if data_config.get("rollout_zarr"):
+        config["rollout_identity"] = train_dataset.rollout_identity
     if args.overfit_samples:
         count = min(args.overfit_samples, len(train_dataset))
         train_dataset = Subset(train_dataset, list(range(count)))
@@ -423,40 +491,39 @@ def main():
         sync_states = bool(train_config.get("fsdp",{}).get("sync_module_states",True))
         if fsdp_enabled and not sync_states:
             raise ValueError("--init-checkpoint with fsdp requires sync_module_states=true")
-        if rank==0 or not fsdp_enabled:
-            checkpoint = torch.load(args.init_checkpoint,
-                                    map_location="cpu",
-                                    weights_only=False,
-                                    mmap=True)
-            saved_model_config = checkpoint["config"]["model"]
-            for key, default in (("use_obs",True),("zero_ztd",False)):
-                saved_value = saved_model_config.get(key,default)
-                current_value = config["model"].get(key,default)
-                if saved_value!=current_value:
-                    raise ValueError(f"{key} mismatch: checkpoint={saved_value}, current config={current_value}")
-            model.load_state_dict(checkpoint["model"],strict=True)
-            print(f"Initialized full Forecast model from {args.init_checkpoint};"
-                  "optimizer,scheduler and training counters start fresh",flush=True)
-            del checkpoint
-            
-            
-    if train_config.get("freeze_fuxi", False):
-        for module in (
-            model.era_encoder, model.time_embed, model.backbone, model.decoder
-        ):
-            for parameter in module.parameters():
-                parameter.requires_grad_(False)
-    if train_config.get("freeze_obs",False):
-        for module in (
-            model.obs_encoder,
-            model.high_fusion,
-            model.low_fusion,
-        ):
-            if module is not None:
-                for parameter in module.parameters():
-                    parameter.requires_grad_(False)
+        load_error = [None]
+        if rank == 0 or not fsdp_enabled:
+            try:
+                checkpoint = torch.load(args.init_checkpoint, map_location="cpu",
+                                        weights_only=False, mmap=True)
+                report = initialize_model_weights(
+                    model, checkpoint, config["model"], fuxi_only=args.init_fuxi_only,
+                )
+                print(f"Weight initialization: {report}", flush=True)
+                print(f"Initialized Forecast model from {args.init_checkpoint}; "
+                      "optimizer, scheduler and training counters start fresh", flush=True)
+                del checkpoint
+            except Exception as error:
+                load_error[0] = f"{type(error).__name__}: {error}"
+        if fsdp_enabled:
+            dist.broadcast_object_list(load_error, src=0)
+        if load_error[0] is not None:
+            raise RuntimeError(f"model initialization failed: {load_error[0]}")
+        config["initialization"] = {
+            "checkpoint": file_identity(args.init_checkpoint),
+            "fuxi_only": args.init_fuxi_only,
+        }
+
+    apply_freeze_policy(model, train_config)
 
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
+    if rank == 0:
+        for name in ("era_encoder", "time_embed", "backbone", "decoder",
+                     "obs_encoder", "high_fusion", "low_fusion"):
+            module = getattr(model, name)
+            if module is not None:
+                count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                print(f"trainable {name}: {count:,}", flush=True)
     if not trainable_parameters:
         raise ValueError(
             "no trainable parameters: enable model.use_obs or set train.freeze_fuxi=false"
@@ -494,6 +561,20 @@ def main():
     start_epoch, optimizer_step, best_val = 0, 0, float("inf")
     resume_path = args.resume
     if resume_path:
+        # A resume is not a phase transition: optimizer parameter sets must match.
+        saved = torch.load(resume_path, map_location="cpu", mmap=True, weights_only=False)
+        old_config = saved["config"]
+        if data_config.get("rollout_zarr") and old_config.get("rollout_identity") != config["rollout_identity"]:
+            raise ValueError("resume rollout source/data identity mismatch")
+        for key in ("freeze_fuxi", "freeze_obs"):
+            if old_config["train"].get(key, False) != train_config.get(key, False):
+                raise ValueError(f"resume {key} mismatch; use --init-checkpoint for a new phase")
+        if (old_config.get("data", {}).get("forecast_lead_hours", 6)
+                != data_config.get("forecast_lead_hours", 6)
+                or old_config["model"].get("zero_ztd", False) != config["model"].get("zero_ztd", False)
+                or old_config["model"].get("use_obs", True) != config["model"].get("use_obs", True)):
+            raise ValueError("resume lead/zero_ztd/use_obs mismatch; use --init-checkpoint")
+        del saved
         checkpoint = load_checkpoint(
             resume_path, model, optimizer, scheduler, rank
         )
@@ -529,6 +610,14 @@ def main():
         device=device,
     )
     optimizer.zero_grad(set_to_none=True)
+    if train_config.get("validate_before_training", False) and not args.resume:
+        initial = validate(model, val_loader, device, lat, train_config,
+                           amp_enabled, amp_dtype, world_size)
+        if rank == 0:
+            print(f"initial validation before updates: val={initial[0]:.6f} "
+                  f"val_global={initial[1]:.6f} val_halo={initial[2]:.6f}", flush=True)
+            with (output_dir / "initial_validation.json").open("w") as handle:
+                json.dump(dict(val=initial[0], val_global=initial[1], val_halo=initial[2]), handle, indent=2)
     for epoch in range(start_epoch, int(train_config["epochs"])):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)

@@ -1,5 +1,18 @@
 # da-forecast
 
+12h 自回归预报（独立双四维数组 Zarr、仅微调 FuXi）见
+[ROLLOUT_12H.md](ROLLOUT_12H.md)。源模型为
+`work_dirs/da_forecast_stage2_finetune_fuxi/best.pt`；生成 T+6 时使用 T 的真实观测，
+12h rollout 训练关闭 OBS 分支。原始 ERA5 Zarr 不修改。
+
+训练和测试仍分别使用 `train.py`、`evaluate.py`。评估默认输出至 checkpoint
+目录下的 split 子目录；与原始 FuXi 的对照绘图需显式传入 `--fuxi-reference`，
+12h 实验不能使用 6h 对照文件。
+
+原始 FuXi 两步 12h 基线使用 `evaluate_original_fuxi.py`，支持四卡 FSDP/BF16；
+同一原始权重连续推理两步，不用 DA 的 T+6 预测、不需要微调。
+运行与绘图命令见 [12h 文档第 7 节](ROLLOUT_12H.md#7-原始-fuxi-两步-12h-基线)。
+
 第一次阅读项目，建议先看中文
 [代码导读：从一个样本到一次训练更新](CODE_WALKTHROUGH.md)。
 其中解释数据、网络、FSDP、loss、checkpoint、评估和已知注意事项，

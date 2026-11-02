@@ -23,7 +23,7 @@ from data import DAForecastDataset
 from model import DAForecastNet
 from train import (
     autocast_settings, load_config, make_dataset, resolve_data_paths,
-    setup_distributed, wrap_fsdp,
+    setup_distributed, wrap_fsdp, forward_model,
 )
 
 
@@ -57,9 +57,8 @@ def parse_args():
     parser.add_argument("--config", default="configs/train_da_forecast.json")
     parser.add_argument("--checkpoint")
     parser.add_argument("--split", choices=("val", "test"), default="test")
-    parser.add_argument(
-        "--output-dir", default="work_dirs/da_forecast_6h_40epoch_halo_only/test"
-    )
+    parser.add_argument("--output-dir", default=None,
+                        help="defaults to the checkpoint directory / split")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--batch-size", type=int, default=1,
@@ -72,8 +71,8 @@ def parse_args():
     parser.add_argument("--skip-animations", action="store_true")
     parser.add_argument("--skip-mae-plots", action="store_true",
                         help="do not generate per-channel MAE comparison PNGs")
-    parser.add_argument("--fuxi-reference", type=Path, default="work_dirs/da_forecast_global_6h_fsdp_train_obs/comparison_fuxi_corrected_conds_bf16_20261026/channel_comparison.csv",
-                        help="original FuXi channel_comparison.csv with sibling summary.json")
+    parser.add_argument("--fuxi-reference", type=Path, default=None,
+                        help="optional matching-lead FuXi channel_comparison.csv with sibling summary.json")
     parser.add_argument("--plot-only", action="store_true",
                         help="plot existing CSV metrics in --output-dir; no inference")
     args = parser.parse_args()
@@ -83,6 +82,12 @@ def parse_args():
         parser.error("--plot-only and --skip-mae-plots cannot be combined")
     if args.plot_only and args.fuxi_reference is None:
         parser.error("--plot-only requires --fuxi-reference")
+    if args.plot_only and args.output_dir is None:
+        parser.error("--plot-only requires --output-dir")
+    if args.batch_size < 1 or args.num_workers < 0:
+        parser.error("batch-size must be positive and num-workers nonnegative")
+    if args.output_dir is None:
+        args.output_dir = str(Path(args.checkpoint).resolve().parent / args.split)
     return args
 
 
@@ -370,8 +375,12 @@ def write_metrics(
         )
 
     split_name = (provenance or {}).get("split", "test")
+    lead_hours = int(getattr(dataset, "lead_hours", 6))
     summary = {
         f"{split_name}_split": [str(dataset.analysis_times[0]), str(dataset.analysis_times[-1] + pd.Timedelta(hours=6))],
+        "forecast_lead_hours": lead_hours,
+        "valid_time_first": str(dataset.analysis_times[0] + pd.Timedelta(hours=lead_hours)),
+        "valid_time_last": str(dataset.analysis_times[-1] + pd.Timedelta(hours=lead_hours)),
         "samples": sample_count,
         "loss_mode": loss_mode,
         "halo_radius_cells": int(halo_radius),
@@ -432,11 +441,19 @@ def read_fuxi_comparison(output_dir, reference_csv):
             or ref_summary["samples"] != model_summary["samples"]):
         raise ValueError("FuXi reference must cover the same full test set; pilot/subset is not valid")
     evaluation = model_summary.get("evaluation", {})
+    lead = int(model_summary.get("forecast_lead_hours", 6))
+    if lead != int(ref_summary.get("forecast_lead_hours", 6)):
+        raise ValueError("FuXi reference forecast lead differs; a 6h baseline cannot evaluate 12h")
+    if lead == 12:
+        identity = evaluation.get("rollout", {}).get("identity")
+        if identity is None or ref_summary.get("rollout_identity") != identity:
+            raise ValueError("FuXi reference rollout origins/data identity differs from model evaluation")
     if evaluation.get("split") != "test" or "test_split" not in model_summary:
         raise ValueError("this FuXi reference comparison requires test-split metrics")
     # write_metrics stores [first analysis time, last analysis time + 6h].
-    first = pd.Timestamp(model_summary["test_split"][0]) + pd.Timedelta(hours=6)
-    last = pd.Timestamp(model_summary["test_split"][1])
+    first = pd.Timestamp(model_summary.get("valid_time_first",
+        pd.Timestamp(model_summary["test_split"][0]) + pd.Timedelta(hours=lead)))
+    last = pd.Timestamp(model_summary.get("valid_time_last", model_summary["test_split"][1]))
     if (first != pd.Timestamp(ref_summary["valid_time_first"])
             or last != pd.Timestamp(ref_summary["valid_time_last"])):
         raise ValueError("FuXi reference valid-time range differs from model evaluation")
@@ -474,6 +491,7 @@ def plot_channel_mae_comparison(output_dir, reference_csv):
     """
     output_dir = Path(output_dir)
     rows, model_summary, ref_summary = read_fuxi_comparison(output_dir, reference_csv)
+    lead_hours = int(model_summary.get("forecast_lead_hours", 6))
     groups = [
         ("Geopotential height", list(range(0, 13))),
         ("Temperature", list(range(13, 26))),
@@ -531,7 +549,7 @@ def plot_channel_mae_comparison(output_dir, reference_csv):
                 handles, labels = axes.flat[0].get_legend_handles_labels()
                 fig.legend(handles, labels, loc="upper center", ncol=2,
                            bbox_to_anchor=(.5, .956), frameon=False)
-                fig.suptitle(f"{title}: 6 h forecast per-channel MAE | {scale}",
+                fig.suptitle(f"{title}: {lead_hours} h forecast per-channel MAE | {scale}",
                              fontsize=17, y=.99)
                 fig.text(.5, .012,
                          f"{model_summary['samples']} test samples | {ref_summary['amp']} | "
@@ -554,7 +572,7 @@ def plot_channel_mae_comparison(output_dir, reference_csv):
         ax.invert_yaxis()
         ax.axvline(0, color="black", linewidth=.8)
         ax.set_xlabel("(FuXi MAE - DA MAE) / FuXi MAE (%) | normalized | positive = DA better")
-        ax.set_title("Global +6h forecast: DA improvement over original FuXi")
+        ax.set_title(f"Global +{lead_hours}h forecast: DA improvement over original FuXi")
         ax.grid(axis="x", alpha=.2)
         ax.set_axisbelow(True)
         fig.tight_layout()
@@ -574,7 +592,7 @@ def plot_channel_mae_comparison(output_dir, reference_csv):
         "fuxi_reference_csv": str(Path(reference_csv).resolve()),
         "model_metrics_csv": str((output_dir / "weighted_mae_by_channel.csv").resolve()),
         "model_evaluation": model_summary.get("evaluation"),
-        "samples": model_summary["samples"], "region": "global",
+        "samples": model_summary["samples"], "region": "global", "forecast_lead_hours": lead_hours,
         "original_mae_normalized": original, "da_mae_normalized": model,
         "improvement_percent": 100 * (original - model) / original if original > 0 else None,
         "improved_channels": sum(r["da_mae_normalized"] < r["original_mae_normalized"] for r in rows),
@@ -597,6 +615,11 @@ def main():
         return
     config = load_config(args.config)
     data_config = resolve_data_paths(args.config, config["data"])
+    lead_hours = int(data_config.get("forecast_lead_hours", 6))
+    if args.fuxi_reference is not None and not args.skip_mae_plots:
+        ref = json.loads((args.fuxi_reference.parent / "summary.json").read_text())
+        if int(ref.get("forecast_lead_hours", 6)) != lead_hours:
+            raise ValueError("FuXi reference lead does not match evaluation; generate a matching autoregressive baseline first")
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         rank, _, world_size, device = setup_distributed()
         distributed = True
@@ -612,23 +635,41 @@ def main():
     # Rank 0 loads the CPU model before FSDP synchronizes and shards it.
     checkpoint = None
     checkpoint_metadata = [None]
+    load_error = [None]
     if rank == 0:
-        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-        saved_config = checkpoint.get("config", config)
-        checkpoint_metadata[0] = {
-            "model": saved_config.get("model", config["model"]),
-            "train": saved_config.get("train", config["train"]),
-            "epoch": checkpoint.get("epoch"),
-            "step": checkpoint.get("step"),
-            "best_val": checkpoint.get("best_val"),
-        }
+        try:
+            checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False, mmap=True)
+            saved_config = checkpoint.get("config", config)
+            checkpoint_metadata[0] = {
+                "model": saved_config.get("model", config["model"]),
+                "train": saved_config.get("train", config["train"]),
+                "data": saved_config.get("data", {}),
+                "rollout_identity": saved_config.get("rollout_identity"),
+                "epoch": checkpoint.get("epoch"),
+                "step": checkpoint.get("step"),
+                "best_val": checkpoint.get("best_val"),
+            }
+        except Exception as error:
+            load_error[0] = f"{type(error).__name__}: {error}"
+    if distributed:
+        dist.broadcast_object_list(load_error, src=0)
+    if load_error[0] is not None:
+        raise RuntimeError(f"evaluation checkpoint load failed: {load_error[0]}")
     if distributed:
         dist.broadcast_object_list(checkpoint_metadata, src=0)
     checkpoint_config = checkpoint_metadata[0]
     model_config = checkpoint_config["model"]
     checkpoint_train = checkpoint_config["train"]
+    if int(checkpoint_config["data"].get("forecast_lead_hours", 6)) != lead_hours:
+        raise ValueError("checkpoint forecast lead differs from dataset configuration")
+    if data_config.get("rollout_zarr") and model_config.get("use_obs", True):
+        raise ValueError("two-field rollout evaluation requires a no-OBS checkpoint")
+    if lead_hours == 12 and not data_config.get("rollout_zarr"):
+        raise ValueError("12h evaluation requires data.rollout_zarr")
 
     dataset = make_dataset(data_config, args.split)
+    if data_config.get("rollout_zarr") and checkpoint_config.get("rollout_identity") != dataset.rollout_identity:
+        raise ValueError("evaluation rollout source/data differs from the training checkpoint")
     eval_dataset = IndexedEvalDataset(dataset)
     eval_sampler = DistributedEvalSampler(len(eval_dataset), rank, world_size)
     loader = DataLoader(
@@ -662,7 +703,14 @@ def main():
         "world_size": world_size,
         "weight_loading": "rank0_load_before_fsdp_sync" if distributed else "strict_full_state",
         "amp": checkpoint_train.get("amp", "bf16"),
+        "forecast_lead_hours": lead_hours,
     }
+    if data_config.get("rollout_zarr"):
+        provenance["rollout"] = {
+            "zarr": dataset.path, "identity": dataset.rollout_identity,
+            "source_observations": dataset.source_observations,
+            "rollout_observations": "branch_removed",
+        }
     if rank == 0:
         print("Checkpoint loaded: " + json.dumps(provenance), flush=True)
 
@@ -704,12 +752,10 @@ def main():
         for batch_number, batch in enumerate(loader):
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
-                prediction = model(
-                    batch["era5"], batch["era_static"], batch["time_features"],
-                    batch["obs_ztd"], batch["obs_mask"], batch["obs_static"]
-                )
+                prediction = forward_model(model, batch)
             target = batch["target"]
-            persistence = batch["era5"][:, -1]
+            # At 12h the newest input is a forecast, NOT the persistence baseline.
+            persistence = batch.get("persistence", batch["era5"][:, -1])
             eval_valid = batch["_eval_valid"].to(torch.float32).view(-1, 1, 1, 1)
             valid = batch["target_mask"].to(torch.float32) * eval_valid
             global_weights = valid * lat_weight
@@ -762,7 +808,7 @@ def main():
                     if not bool(batch["_eval_valid"][item].item()):
                         continue
                     sample_index = int(batch["_eval_index"][item].item())
-                    valid_time = dataset.sample_time(sample_index) + pd.Timedelta(hours=6)
+                    valid_time = dataset.sample_time(sample_index) + pd.Timedelta(hours=lead_hours)
                     if animation_start <= valid_time <= animation_end:
                         collect_animation_frame(
                             frames, prediction_cpu[item], target_cpu[item], valid_time,
@@ -826,10 +872,10 @@ def main():
         for name, title, unit, cmap in ANIMATION_VARIABLES:
             if not frames[name]:
                 raise RuntimeError(f"no animation frames selected for {name}")
-            output = animation_dir / f"{name}_20250501_20250505.gif"
+            output = animation_dir / f"{name}_lead{lead_hours}h_{animation_start:%Y%m%d}_{animation_end:%Y%m%d}.gif"
             print(f"writing {output} ({len(frames[name])} frames)", flush=True)
             save_animation(
-                frames[name], name, title, unit, cmap,
+                frames[name], name, f"+{lead_hours}h {title}", unit, cmap,
                 dataset.lat, dataset.lon, halo_mask[0, 0].cpu().numpy(),
                 output, args.animation_fps
             )
