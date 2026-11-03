@@ -1,5 +1,8 @@
 # da-forecast
 
+6h 零 ZTD 实验第二阶段（冻结 OBS/gate、微调 FuXi）：配置和后台命令见
+[ZERO_ZTD_STAGE2.md](ZERO_ZTD_STAGE2.md)。这是 6h 微调，不使用 rollout Zarr。
+
 12h 自回归预报（独立双四维数组 Zarr、仅微调 FuXi）见
 [ROLLOUT_12H.md](ROLLOUT_12H.md)。源模型为
 `work_dirs/da_forecast_stage2_finetune_fuxi/best.pt`；生成 T+6 时使用 T 的真实观测，
