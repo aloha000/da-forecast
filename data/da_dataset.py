@@ -161,9 +161,13 @@ class DAForecastDataset(Dataset):
         global_lon_path: str,
         obs_history_hours: int = 6,
         obs_interval_minutes: int = 20,
+        predict_ztd: bool = False,
     ) -> None:
         super().__init__()
         self.lead_hours = 6
+        self.predict_ztd = bool(predict_ztd)
+        if self.predict_ztd and (obs_history_hours != 6 or obs_interval_minutes != 20):
+            raise ValueError("ZTD prediction requires 6h history / 20min spacing")
         self.era5_path = str(Path(era5_path))
         self.ztd_path = str(Path(ztd_path))
         self.obs_offsets = observation_offsets(
@@ -175,6 +179,9 @@ class DAForecastDataset(Dataset):
 
         era_group = zarr.open(self.era5_path, mode="r")
         ztd_group = zarr.open(self.ztd_path, mode="r")
+        self.ztd_normalization = {k: ztd_group.attrs.get(k) for k in
+                                  ("ztd_train_mean", "ztd_train_std")}
+        self.ztd_normalization["raw_units"] = ztd_group["ztd"].attrs.get("raw_units")
         if "z" not in era_group:
             raise ValueError("ERA5 store must contain the global 70-channel 'z' array")
         era_array = era_group["z"]
@@ -293,12 +300,35 @@ class DAForecastDataset(Dataset):
         )
         return obs, obs_valid
 
+    def read_future_ztd(self, timestamp):
+        """Labels ONLY: T+20min..T+6h, absent times/cells have mask=0.
+
+        Read independently of input selection: missing future GNSS never changes
+        the input mask or drops a weather sample. Values keep source scaling.
+        """
+        self._open()
+        wanted = pd.DatetimeIndex(pd.Timestamp(timestamp) + pd.to_timedelta(np.arange(1, 19) * 20, unit="min"))
+        indices = self.obs_times.get_indexer(wanted)
+        output = np.zeros((18, 1, len(self.lat), len(self.lon)), np.float32)
+        mask = np.zeros_like(output)
+        present = np.flatnonzero(indices >= 0)
+        if len(present):
+            selected = indices[present]
+            if len(selected) > 1 and np.all(np.diff(selected) == np.diff(selected)[0]):
+                raw = np.asarray(self._ztd_group["ztd"][int(selected[0]):int(selected[-1])+1:int(selected[1]-selected[0])], np.float32)
+            else:
+                raw = np.stack([np.asarray(self._ztd_group["ztd"][int(i)], np.float32) for i in selected])
+            values, valid = project_station_values(raw, self.obs_source_lat, self.obs_source_lon,
+                                                   self.obs_target_flat, (len(self.lat), len(self.lon)))
+            output[present, 0], mask[present, 0] = values, valid
+        return output, mask
+
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         timestamp = self.analysis_times[index]
         era5, target, target_valid = self._read_era(timestamp)
         obs, obs_valid = self._read_observations(timestamp)
 
-        return {
+        result = {
             "era5": torch.from_numpy(era5),
             "era_static": torch.from_numpy(self.era_static),
             "time_features": torch.from_numpy(time_features(timestamp)),
@@ -308,6 +338,10 @@ class DAForecastDataset(Dataset):
             "target": torch.from_numpy(target),
             "target_mask": torch.from_numpy(target_valid.astype(np.float32)),
         }
+        if self.predict_ztd:
+            target_ztd, mask = self.read_future_ztd(timestamp)
+            result.update(ztd_target=torch.from_numpy(target_ztd), ztd_target_mask=torch.from_numpy(mask))
+        return result
 
 
 __all__ = [

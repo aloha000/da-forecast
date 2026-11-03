@@ -27,6 +27,7 @@ from data.rollout_fields import (
 )
 from evaluate import DistributedEvalSampler, IndexedEvalDataset, load_distributed_model
 from model import DAForecastNet
+from model.ztd_rollout import next_observations, check_ztd_config
 from train import autocast_settings, load_config, resolve_data_paths, setup_distributed
 
 
@@ -75,6 +76,9 @@ def source_metadata(saved, data, amp):
     if int(saved.get("data", {}).get("forecast_lead_hours", 6)) != 6:
         raise ValueError("source checkpoint must be +6h")
     model_config = dict(saved["model"])
+    joint = data.get("rollout_observations", "branch_removed") == "predicted_ztd_at_T"
+    if joint and (not model_config.get("predict_ztd", False) or model_config.get("zero_ztd", False)):
+        raise ValueError("predicted-ZTD rollout requires a trained +6h predict_ztd checkpoint, zero_ztd=false")
     zero_ztd = source_observation_policy(data) == "zero_ztd_history_at_T"
     if (not model_config.get("use_obs", True)
             or bool(model_config.get("zero_ztd", False)) != zero_ztd):
@@ -142,6 +146,8 @@ def main():
     args.splits = list(dict.fromkeys(args.splits))
     config = load_config(args.config)
     data = resolve_data_paths(args.config, config["data"])
+    check_ztd_config(data, config["model"])
+    joint = bool(config["model"].get("predict_ztd", False))
     if int(data.get("forecast_lead_hours", 6)) != 12 or not data.get("rollout_zarr"):
         raise ValueError("requires forecast_lead_hours=12 and data.rollout_zarr")
     output = Path(data["rollout_zarr"]).resolve()
@@ -155,8 +161,12 @@ def main():
         "schema": SCHEMA, "source_checkpoint": file_identity(data["rollout_source_checkpoint"]),
         "data": data_identity(data), "amp": args.amp,
         "origins_sha256": hashlib.sha256(origins.astype("<i8").tobytes()).hexdigest(),
-        "source_observations": source_observation_policy(data), "rollout_observations": "branch_removed",
+        "source_observations": source_observation_policy(data),
+        "rollout_observations": data.get("rollout_observations", "branch_removed"),
     }
+    if joint:
+        identity["ztd_schema"] = "18_future_20min_frames_v1"
+        identity["ztd_normalization"] = datasets["train"].ztd_normalization
     existing = None
     if output.exists():
         existing = open_store(output)
@@ -166,6 +176,8 @@ def main():
     era_pending, forecasts_pending = pending_rows(existing, datasets, args.splits, args.max_samples)
     field_bytes = 70 * len(datasets["train"].lat) * len(datasets["train"].lon) * 4
     additional = (len(era_pending) + sum(map(len, forecasts_pending.values()))) * field_bytes
+    if joint:
+        additional += sum(map(len, forecasts_pending.values())) * int((datasets["train"].obs_static[0] > 0).sum()) * 37 * 5
     if int(os.environ.get("RANK", 0)) == 0:
         for s in SPLITS:
             print(f"{s}: {len(datasets[s])} origins; selected missing forecasts={len(forecasts_pending.get(s, []))}", flush=True)
@@ -173,7 +185,7 @@ def main():
               f"z_fuxi6h: ({len(origins)},70,{len(datasets['train'].lat)},{len(datasets['train'].lon)})\n"
               f"full uncompressed GiB={(len(times) + len(origins))*field_bytes/2**30:.2f}; "
               f"selected pending GiB={additional/2**30:.2f}\n"
-              f"source={identity['source_observations']}; rollout=OBS branch removed", flush=True)
+              f"source={identity['source_observations']}; rollout={identity['rollout_observations']}", flush=True)
     if args.plan:
         return
 
@@ -265,7 +277,13 @@ def main():
                         tensors = [batch[k].to(device, non_blocking=True) for k in (
                             "era5", "era_static", "time_features", "obs_ztd", "obs_mask", "obs_static")]
                         with torch.autocast(device_type=device.type, dtype=dtype, enabled=enabled):
-                            prediction = model(*tensors).float().cpu().numpy()
+                            model_output = model(*tensors)
+                        if joint:
+                            obs_next, mask_next = next_observations(tensors[3], tensors[4], model_output["ztd"])
+                            obs_next, mask_next = obs_next.float().cpu().numpy(), mask_next.cpu().numpy()
+                            prediction = model_output["weather"].float().cpu().numpy()
+                        else:
+                            prediction = (model_output["weather"] if isinstance(model_output, dict) else model_output).float().cpu().numpy()
                         error = None
                         try:
                             for j in range(len(prediction)):
@@ -273,7 +291,13 @@ def main():
                                     continue
                                 local_index = pending[int(batch["_eval_index"][j])]
                                 index = int(np.searchsorted(origins, ds.sample_time(local_index).value))
-                                write_field(root, "z_fuxi6h", index, prediction[j])
+                                payload = None
+                                if joint:
+                                    # Future truth is read ONLY after inference and saved as labels.
+                                    target_ztd, target_mask = ds.read_future_ztd(ds.sample_time(local_index) + pd.Timedelta(hours=6))
+                                    payload = dict(ztd_input=obs_next[j], ztd_input_mask=mask_next[j],
+                                                   ztd_target=target_ztd, ztd_target_mask=target_mask)
+                                write_field(root, "z_fuxi6h", index, prediction[j], ztd_payload=payload)
                         except Exception as exc:
                             error = f"forecast write: {type(exc).__name__}: {exc}"
                         synchronize_error(error, control, world_size)

@@ -1,5 +1,8 @@
 # da-forecast
 
+预测未来18帧ZTD并反馈到下一轮：见 [PREDICT_ZTD.md](PREDICT_ZTD.md)，
+包含新头预热、6h联合微调、12h数据生成/训练/测试命令。旧配置默认不启用。
+
 12h 自回归预报（独立双四维数组 Zarr、仅微调 FuXi）见
 [ROLLOUT_12H.md](ROLLOUT_12H.md)。源模型为
 `work_dirs/da_forecast_stage2_finetune_fuxi/best.pt`；生成 T+6 时使用 T 的真实观测，

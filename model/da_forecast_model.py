@@ -268,6 +268,7 @@ class ForecastDecoder(nn.Module):
         embed_dim: int = 1536,
         out_channels: int = 70,
         patch_size: int = 4,
+        predict_ztd: bool = False,
     ) -> None:
         super().__init__()
         self.patch_size = int(patch_size)
@@ -283,6 +284,8 @@ class ForecastDecoder(nn.Module):
         self.head = nn.Linear(
             embed_dim, out_channels * self.patch_size * self.patch_size
         )
+        # Separate head: old weather-head keys/shapes remain checkpoint compatible.
+        self.ztd_head = nn.Linear(embed_dim, 18 * self.patch_size ** 2) if predict_ztd else None
 
     def forward(
         self,
@@ -294,14 +297,20 @@ class ForecastDecoder(nn.Module):
             raise ValueError("bottleneck and low-resolution skip sizes do not match")
         x = self.up_block(torch.cat((bottleneck, low_skip), dim=1), temb)
         tokens = rearrange(x, "b c h w -> b (h w) c")
+        ztd = None
+        if self.ztd_head is not None:
+            ztd = checkpoint.checkpoint(self.ztd_head, tokens, use_reentrant=False)
+            ztd = rearrange(ztd, "b (h w) (p1 p2 t) -> b t 1 (h p1) (w p2)",
+                            h=x.shape[-2], p1=self.patch_size, p2=self.patch_size)
         tokens = checkpoint.checkpoint(self.head, tokens, use_reentrant=False)
-        return rearrange(
+        weather = rearrange(
             tokens,
             "b (h w) (p1 p2 c) -> b c (h p1) (w p2)",
             h=x.shape[-2],
             p1=self.patch_size,
             p2=self.patch_size,
         )
+        return (weather, ztd) if ztd is not None else weather
 
 
 class DAForecastNet(nn.Module):
@@ -311,6 +320,8 @@ class DAForecastNet(nn.Module):
     ``[B,T,1,720,1440]``. The output is the directly predicted next ERA5
     analysis with shape ``[B,70,720,1440]``. FuXi predicts a six-hour
     increment, which is added to the current ERA5 analysis.
+    With predict_ztd=True return a dict containing weather and 18 future ZTD
+    frames [B,18,1,H,W] at 20-minute spacing; weather-head parameters stay intact.
     """
 
     def __init__(
@@ -329,7 +340,8 @@ class DAForecastNet(nn.Module):
         mlp_ratio: float = 4.0,
         time_dim: int = 12,
         use_obs: bool = True,
-        zero_ztd: bool = False
+        zero_ztd: bool = False,
+        predict_ztd: bool = False,
     ) -> None:
         super().__init__()
         _check_feature_width(embed_dim, num_heads)
@@ -344,6 +356,9 @@ class DAForecastNet(nn.Module):
         self.patch_size = patch_size
         self.use_obs = use_obs
         self.zero_ztd = zero_ztd
+        self.predict_ztd = predict_ztd
+        if predict_ztd and (not use_obs or zero_ztd):
+            raise ValueError("predict_ztd requires use_obs=true and zero_ztd=false")
 
         scale = patch_size * 2
         if any(v % scale != 0 for v in self.image_size):
@@ -378,7 +393,7 @@ class DAForecastNet(nn.Module):
             num_heads,
             mlp_ratio,
         )
-        self.decoder = ForecastDecoder(embed_dim, out_channels, patch_size)
+        self.decoder = ForecastDecoder(embed_dim, out_channels, patch_size, predict_ztd)
 
     def forward(
         self,
@@ -419,6 +434,9 @@ class DAForecastNet(nn.Module):
 
         bottleneck = self.backbone(low)
         residual = self.decoder(bottleneck, low, temb)
+        if self.predict_ztd:
+            weather, ztd = residual
+            return {"weather": era5[:, -1] + weather, "ztd": ztd}
         return era5[:, -1] + residual
 
 

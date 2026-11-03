@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from data import DAForecastDataset
 from model import DAForecastNet
+from model.ztd_rollout import check_ztd_config, ztd_error_sums
 from train import (
     autocast_settings, load_config, make_dataset, resolve_data_paths,
     setup_distributed, wrap_fsdp, forward_model,
@@ -662,8 +663,7 @@ def main():
     checkpoint_train = checkpoint_config["train"]
     if int(checkpoint_config["data"].get("forecast_lead_hours", 6)) != lead_hours:
         raise ValueError("checkpoint forecast lead differs from dataset configuration")
-    if data_config.get("rollout_zarr") and model_config.get("use_obs", True):
-        raise ValueError("two-field rollout evaluation requires a no-OBS checkpoint")
+    check_ztd_config(data_config, model_config)
     if lead_hours == 12 and not data_config.get("rollout_zarr"):
         raise ValueError("12h evaluation requires data.rollout_zarr")
 
@@ -709,7 +709,7 @@ def main():
         provenance["rollout"] = {
             "zarr": dataset.path, "identity": dataset.rollout_identity,
             "source_observations": dataset.source_observations,
-            "rollout_observations": "branch_removed",
+            "rollout_observations": dataset.rollout_observations,
         }
     if rank == 0:
         print("Checkpoint loaded: " + json.dumps(provenance), flush=True)
@@ -733,6 +733,9 @@ def main():
             "halo_persistence_physical", "halo_denominator",
         )
     }
+    if model_config.get("predict_ztd", False):
+        sums["ztd_absolute_error"] = torch.zeros(18, dtype=torch.float64, device=device)
+        sums["ztd_valid_count"] = torch.zeros(18, dtype=torch.float64, device=device)
     station_mask = torch.as_tensor(
         dataset.obs_static[:1], dtype=torch.float32, device=device
     ).unsqueeze(0)
@@ -753,6 +756,14 @@ def main():
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
                 prediction = forward_model(model, batch)
+            if isinstance(prediction, dict):
+                if not torch.isfinite(prediction["ztd"]).all():
+                    raise ValueError("nonfinite ZTD prediction during evaluation")
+                error, count = ztd_error_sums(prediction["ztd"], batch["ztd_target"],
+                                               batch["ztd_target_mask"], batch["_eval_valid"])
+                sums["ztd_absolute_error"] += error.double()
+                sums["ztd_valid_count"] += count.double()
+                prediction = prediction["weather"]
             target = batch["target"]
             # At 12h the newest input is a forecast, NOT the persistence baseline.
             persistence = batch.get("persistence", batch["era5"][:, -1])
@@ -860,6 +871,8 @@ def main():
             loss_mode, halo_weight, halo_radius, provenance=provenance
         )
         print(json.dumps(summary, indent=2, ensure_ascii=False))
+        if model_config.get("predict_ztd", False):
+            write_ztd_metrics(output_dir, numpy_sums, dataset, lead_hours, provenance)
         if not args.skip_mae_plots:
             if args.fuxi_reference is not None:
                 plot_channel_mae_comparison(output_dir, args.fuxi_reference)
@@ -882,6 +895,31 @@ def main():
 
     if distributed:
         dist.destroy_process_group()
+
+
+def write_ztd_metrics(output_dir, sums, dataset, lead_hours, provenance):
+    error, count = sums["ztd_absolute_error"], sums["ztd_valid_count"]
+    norm = getattr(dataset, "ztd_normalization", {})
+    std = norm.get("ztd_train_std")
+    physical = std is not None and np.isfinite(std) and std > 0 and norm.get("raw_units") == "mm"
+    per_lead = [float(e / n) if n else None for e, n in zip(error, count)]
+    overall = float(error.sum() / count.sum()) if count.sum() else None
+    offsets = list(range((lead_hours-6)*60+20, lead_hours*60+1, 20))
+    report = {"evaluation": provenance, "ztd_normalization": norm,
+              "weighting": "equal weight per valid station-grid-cell/time; no latitude weights",
+              "input_policy": getattr(dataset, "rollout_observations", "real_history_at_T"),
+              "valid_count": int(count.sum()), "mae_normalized": overall,
+              "mae_mm": overall * std if physical and overall is not None else None,
+              "lead_minutes_from_original_T": offsets, "mae_normalized_by_lead": per_lead}
+    with (Path(output_dir) / "ztd_mae_summary.json").open("w") as handle:
+        json.dump(report, handle, indent=2, allow_nan=False)
+    with (Path(output_dir) / "ztd_mae_by_lead.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("lead_minutes", "valid_count", "mae_normalized", "mae_mm"))
+        for offset, n, value in zip(offsets, count, per_lead):
+            writer.writerow((offset, int(n), value, value*std if physical and value is not None else None))
+    print(f"ZTD valid_count={report['valid_count']} MAE(normalized)={overall} MAE(mm)={report['mae_mm']}", flush=True)
+    return report
 
 
 if __name__ == "__main__":

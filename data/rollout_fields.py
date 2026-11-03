@@ -71,7 +71,7 @@ def initialize_store(path, identity, datasets, source_model_config):
                        "source_model_config": source_model_config,
                        "forecast_lead_hours": 12, "source_lead_hours": 6,
                        "source_observations": identity.get("source_observations", "real_history_at_T"),
-                       "rollout_observations": "branch_removed"})
+                       "rollout_observations": identity.get("rollout_observations", "branch_removed")})
     for name, value, dims in (
         ("time", times, ("time",)), ("init_time", origins, ("init_time",)),
         ("split_code", codes, ("init_time",)),
@@ -99,11 +99,16 @@ def initialize_store(path, identity, datasets, source_model_config):
     # One row per chunk: ranks never share a mutable chunk, including flags.
     create_array(root, "era_complete", (len(times),), "bool", (1,), ("time",))
     create_array(root, "forecast_complete", (len(origins),), "bool", (1,), ("init_time",))
+    if identity.get("rollout_observations") == "predicted_ztd_at_T":
+        from .ztd_fields import initialize_ztd_fields
+        if not source_model_config.get("predict_ztd", False):
+            raise ValueError("source needs a trained ZTD head")
+        initialize_ztd_fields(root, first, len(origins))
     root.attrs["initialized"] = True
     return root
 
 
-def write_field(root, name, index, value):
+def write_field(root, name, index, value, ztd_payload=None):
     if name not in ("z", "z_fuxi6h"):
         raise ValueError("unknown field")
     if not 0 <= index < root[name].shape[0]:
@@ -115,6 +120,11 @@ def write_field(root, name, index, value):
         raise ValueError("nonfinite source prediction")
     flag = root["era_complete" if name == "z" else "forecast_complete"]
     flag[index] = False
+    if name == "z_fuxi6h" and root.attrs.get("rollout_observations") == "predicted_ztd_at_T":
+        from .ztd_fields import write_ztd_payload
+        if ztd_payload is None:
+            raise ValueError("joint forecast requires ZTD input and labels before completion")
+        write_ztd_payload(root, index, ztd_payload)
     root[name][index] = value
     flag[index] = True
 
@@ -129,9 +139,14 @@ class RolloutFieldsDataset(Dataset):
         if root.attrs.get("schema") != SCHEMA or not root.attrs.get("initialized"):
             raise ValueError("not a fully initialized two-field 12h Zarr")
         if (root.attrs.get("source_observations") not in ("real_history_at_T", "zero_ztd_history_at_T")
-                or root.attrs.get("rollout_observations") != "branch_removed"):
+                or root.attrs.get("rollout_observations") not in ("branch_removed", "predicted_ztd_at_T")):
             raise ValueError("Zarr observation policy mismatch")
         self.rollout_identity = dict(root.attrs["identity"])
+        self.rollout_observations = root.attrs["rollout_observations"]
+        if self.rollout_observations != self.rollout_identity.get("rollout_observations", "branch_removed"):
+            raise ValueError("Zarr rollout observation policy differs from identity")
+        self.predict_ztd = self.rollout_observations == "predicted_ztd_at_T"
+        self.ztd_normalization = dict(root.attrs.get("ztd_normalization", {}))
         self.source_observations = root.attrs["source_observations"]
         if self.source_observations != self.rollout_identity.get("source_observations", "real_history_at_T"):
             raise ValueError("Zarr observation policy differs from identity")
@@ -165,6 +180,11 @@ class RolloutFieldsDataset(Dataset):
         self.obs_static = np.stack((station, np.zeros_like(station), np.zeros_like(station)))
         self.lead_hours, self.obs_frames = 12, 1
         self.obs_history_hours, self.obs_interval_minutes = 0, 20
+        if self.predict_ztd:
+            from .ztd_fields import validate_ztd_fields
+            validate_ztd_fields(root, len(origins), len(self.lat), len(self.lon))
+            self.obs_static = np.asarray(root["obs_static"][:], np.float32)
+            self.obs_frames, self.obs_history_hours = 19, 6
         self.channels = int(root["z"].shape[1])
         shape = (self.channels, len(self.lat), len(self.lon))
         if (root["z"].shape != (len(times), *shape)
@@ -198,7 +218,7 @@ class RolloutFieldsDataset(Dataset):
         current = np.where(np.isfinite(current), current, 0).astype(np.float32)
         valid = np.isfinite(target)
         zero = torch.zeros((1, 1, len(self.lat), len(self.lon)), dtype=torch.float32)
-        return {
+        result = {
             "era5": torch.from_numpy(np.stack((current, prediction))),
             "persistence": torch.from_numpy(current.copy()),
             "target": torch.from_numpy(np.where(valid, target, 0).astype(np.float32)),
@@ -208,3 +228,7 @@ class RolloutFieldsDataset(Dataset):
             "obs_ztd": zero, "obs_mask": zero.clone(),
             "obs_static": torch.from_numpy(self.obs_static),
         }
+        if self.predict_ztd:
+            from .ztd_fields import read_ztd_payload
+            result.update(read_ztd_payload(self._root, int(self.forecast_indices[index])))
+        return result
