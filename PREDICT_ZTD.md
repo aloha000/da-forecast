@@ -1,5 +1,7 @@
 # 预测 ZTD 并反馈到下一轮（predict_ztd 分支）
 
+> 本文描述旧版直接预测 ZTD 的实验。新的“只监督 ZHD/ZWD、ZTD 相加派生”方案及命令见 [PREDICT_DELAYS.md](PREDICT_DELAYS.md)。
+
 ## 已实现的范围
 
 - 6h 气象 + 18 帧 ZTD 联合训练、独立新头预热、旧 checkpoint 初始化。

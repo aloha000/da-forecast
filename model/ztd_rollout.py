@@ -39,9 +39,13 @@ def ztd_error_sums(prediction, target, mask, sample_valid=None):
 def advance_rollout_batch(batch, output, next_time_features):
     """Create only model inputs for the next hop; never carry truth/label fields."""
     obs, mask = next_observations(batch["obs_ztd"], batch["obs_mask"], output["ztd"])
-    return {"era5": torch.stack((batch["era5"][:, -1], output["weather"]), dim=1),
+    result = {"era5": torch.stack((batch["era5"][:, -1], output["weather"]), dim=1),
             "era_static": batch["era_static"], "time_features": next_time_features,
             "obs_ztd": obs, "obs_mask": mask, "obs_static": batch["obs_static"]}
+    if "components" in output:
+        from .delay_components import next_component_inputs
+        result.update(next_component_inputs(batch, output))
+    return result
 
 
 def forecast_rollout(model, batch, time_features_by_step):
@@ -51,6 +55,8 @@ def forecast_rollout(model, batch, time_features_by_step):
     autocast and whether graphs are retained. No labels are used by this iterator.
     """
     state = {k: batch[k] for k in ("era5", "era_static", "time_features", "obs_ztd", "obs_mask", "obs_static")}
+    from .delay_components import COMPONENT_INPUTS
+    state.update({k: batch[k] for k in COMPONENT_INPUTS if k in batch})
     previous = None
     for features in time_features_by_step:
         if previous is not None:
@@ -72,6 +78,16 @@ def check_ztd_config(data, model):
     enabled = bool(model.get("predict_ztd", False))
     if enabled != bool(data.get("predict_ztd", False)):
         raise ValueError("data.predict_ztd must match model.predict_ztd")
+    dual = bool(model.get("predict_delay_components", False))
+    if dual != bool(data.get("predict_delay_components", False)):
+        raise ValueError("data/model.predict_delay_components mismatch")
+    if dual:
+        if not enabled:
+            raise ValueError("component mode requires predict_ztd=true for derived total")
+        if list(model.get("component_loss_scales", [100., 100.])) != list(data.get("component_loss_scales", [100., 100.])):
+            raise ValueError("data/model component loss scales mismatch")
+        if bool(model.get("use_delay_physics", False)) != bool(data.get("use_delay_physics", False)):
+            raise ValueError("data/model use_delay_physics mismatch")
     if enabled:
         if not model.get("use_obs", True) or model.get("zero_ztd", False):
             raise ValueError("predict_ztd requires active nonzero OBS branch")
@@ -79,7 +95,7 @@ def check_ztd_config(data, model):
             raise ValueError("predict_ztd requires 6h history and 20min spacing")
     if data.get("rollout_zarr"):
         policy = data.get("rollout_observations", "branch_removed")
-        expected = "predicted_ztd_at_T" if enabled else "branch_removed"
+        expected = "predicted_components_at_T" if dual else ("predicted_ztd_at_T" if enabled else "branch_removed")
         if policy != expected:
             raise ValueError("rollout_observations incompatible with predict_ztd")
         if not enabled and model.get("use_obs", True):

@@ -99,7 +99,7 @@ def initialize_store(path, identity, datasets, source_model_config):
     # One row per chunk: ranks never share a mutable chunk, including flags.
     create_array(root, "era_complete", (len(times),), "bool", (1,), ("time",))
     create_array(root, "forecast_complete", (len(origins),), "bool", (1,), ("init_time",))
-    if identity.get("rollout_observations") == "predicted_ztd_at_T":
+    if identity.get("rollout_observations") in ("predicted_ztd_at_T", "predicted_components_at_T"):
         from .ztd_fields import initialize_ztd_fields
         if not source_model_config.get("predict_ztd", False):
             raise ValueError("source needs a trained ZTD head")
@@ -120,7 +120,7 @@ def write_field(root, name, index, value, ztd_payload=None):
         raise ValueError("nonfinite source prediction")
     flag = root["era_complete" if name == "z" else "forecast_complete"]
     flag[index] = False
-    if name == "z_fuxi6h" and root.attrs.get("rollout_observations") == "predicted_ztd_at_T":
+    if name == "z_fuxi6h" and root.attrs.get("rollout_observations") in ("predicted_ztd_at_T", "predicted_components_at_T"):
         from .ztd_fields import write_ztd_payload
         if ztd_payload is None:
             raise ValueError("joint forecast requires ZTD input and labels before completion")
@@ -139,13 +139,18 @@ class RolloutFieldsDataset(Dataset):
         if root.attrs.get("schema") != SCHEMA or not root.attrs.get("initialized"):
             raise ValueError("not a fully initialized two-field 12h Zarr")
         if (root.attrs.get("source_observations") not in ("real_history_at_T", "zero_ztd_history_at_T")
-                or root.attrs.get("rollout_observations") not in ("branch_removed", "predicted_ztd_at_T")):
+                or root.attrs.get("rollout_observations") not in ("branch_removed", "predicted_ztd_at_T", "predicted_components_at_T")):
             raise ValueError("Zarr observation policy mismatch")
         self.rollout_identity = dict(root.attrs["identity"])
         self.rollout_observations = root.attrs["rollout_observations"]
         if self.rollout_observations != self.rollout_identity.get("rollout_observations", "branch_removed"):
             raise ValueError("Zarr rollout observation policy differs from identity")
-        self.predict_ztd = self.rollout_observations == "predicted_ztd_at_T"
+        self.predict_delay_components = self.rollout_observations == "predicted_components_at_T"
+        if self.predict_delay_components != bool(root.attrs.get("predict_delay_components", False)):
+            raise ValueError("rollout component schema mismatch")
+        self.predict_ztd = self.rollout_observations in ("predicted_ztd_at_T", "predicted_components_at_T")
+        if self.predict_delay_components:
+            self.component_loss_scales = np.asarray(root.attrs["component_loss_scales"], np.float32)
         self.ztd_normalization = dict(root.attrs.get("ztd_normalization", {}))
         self.source_observations = root.attrs["source_observations"]
         if self.source_observations != self.rollout_identity.get("source_observations", "real_history_at_T"):

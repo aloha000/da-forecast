@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from data import DAForecastDataset
 from model import DAForecastNet
 from model.ztd_rollout import check_ztd_config, ztd_error_sums
+from model.delay_components import component_error_sums, latest_components
 from train import (
     autocast_settings, load_config, make_dataset, resolve_data_paths,
     setup_distributed, wrap_fsdp, forward_model,
@@ -733,7 +734,10 @@ def main():
             "halo_persistence_physical", "halo_denominator",
         )
     }
-    if model_config.get("predict_ztd", False):
+    if model_config.get("predict_delay_components", False):
+        for name in ("component_absolute_error", "component_valid_count", "component_persistence_error"):
+            sums[name] = torch.zeros(2, 18, dtype=torch.float64, device=device)
+    elif model_config.get("predict_ztd", False):
         sums["ztd_absolute_error"] = torch.zeros(18, dtype=torch.float64, device=device)
         sums["ztd_valid_count"] = torch.zeros(18, dtype=torch.float64, device=device)
     station_mask = torch.as_tensor(
@@ -756,7 +760,18 @@ def main():
             batch = {key: value.to(device, non_blocking=True) for key, value in batch.items()}
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
                 prediction = forward_model(model, batch)
-            if isinstance(prediction, dict):
+            if isinstance(prediction, dict) and "components" in prediction:
+                if not torch.isfinite(prediction["components"]).all():
+                    raise ValueError("nonfinite component prediction during evaluation")
+                error, count = component_error_sums(prediction, batch, batch["_eval_valid"], scaled=False)
+                base, _ = latest_components(batch["obs_components"], batch["obs_component_mask"])
+                baseline = {**prediction, "components": base.expand_as(prediction["components"])}
+                perr, _ = component_error_sums(baseline, batch, batch["_eval_valid"], scaled=False)
+                sums["component_absolute_error"] += error.double()
+                sums["component_valid_count"] += count.double()
+                sums["component_persistence_error"] += perr.double()
+                prediction = prediction["weather"]
+            elif isinstance(prediction, dict):
                 if not torch.isfinite(prediction["ztd"]).all():
                     raise ValueError("nonfinite ZTD prediction during evaluation")
                 error, count = ztd_error_sums(prediction["ztd"], batch["ztd_target"],
@@ -871,7 +886,9 @@ def main():
             loss_mode, halo_weight, halo_radius, provenance=provenance
         )
         print(json.dumps(summary, indent=2, ensure_ascii=False))
-        if model_config.get("predict_ztd", False):
+        if model_config.get("predict_delay_components", False):
+            write_component_metrics(output_dir, numpy_sums, dataset, lead_hours, provenance)
+        elif model_config.get("predict_ztd", False):
             write_ztd_metrics(output_dir, numpy_sums, dataset, lead_hours, provenance)
         if not args.skip_mae_plots:
             if args.fuxi_reference is not None:
@@ -895,6 +912,35 @@ def main():
 
     if distributed:
         dist.destroy_process_group()
+
+
+def write_component_metrics(output_dir, sums, dataset, lead_hours, provenance):
+    """Only ZHD/ZWD metrics. Same valid pairs for model and persistence."""
+    error, count = sums["component_absolute_error"], sums["component_valid_count"]
+    baseline = sums["component_persistence_error"]
+    scales = np.asarray(dataset.component_loss_scales)
+    report = {"evaluation": provenance, "units": "mm", "loss_scales_mm": scales.tolist(),
+              "aggregation": "unweighted valid station-cell/time pairs; model and persistence share masks",
+              "ztd": "derived as zhd + zwd; no independent head or loss", "components": {}}
+    rows = []
+    for j, name in enumerate(("zhd", "zwd")):
+        n = int(count[j].sum())
+        mae = float(error[j].sum()/n) if n else None
+        persist = float(baseline[j].sum()/n) if n else None
+        report["components"][name] = {"valid_count": n, "mae_mm": mae,
+              "mae_scaled": mae/float(scales[j]) if n else None, "persistence_mae_mm": persist}
+        for k in range(18):
+            nk = int(count[j,k])
+            rows.append({"component": name, "lead_minutes_from_origin": (lead_hours-6)*60+(k+1)*20,
+                         "valid_count": nk, "mae_mm": float(error[j,k]/nk) if nk else None,
+                         "persistence_mae_mm": float(baseline[j,k]/nk) if nk else None})
+    with (Path(output_dir)/"delay_mae_summary.json").open("w") as handle:
+        json.dump(report, handle, indent=2, allow_nan=False)
+    with (Path(output_dir)/"delay_mae_by_lead.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(json.dumps(report, indent=2), flush=True)
 
 
 def write_ztd_metrics(output_dir, sums, dataset, lead_hours, provenance):

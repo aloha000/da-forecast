@@ -269,6 +269,7 @@ class ForecastDecoder(nn.Module):
         out_channels: int = 70,
         patch_size: int = 4,
         predict_ztd: bool = False,
+        predict_delay_components: bool = False,
     ) -> None:
         super().__init__()
         self.patch_size = int(patch_size)
@@ -285,7 +286,14 @@ class ForecastDecoder(nn.Module):
             embed_dim, out_channels * self.patch_size * self.patch_size
         )
         # Separate head: old weather-head keys/shapes remain checkpoint compatible.
-        self.ztd_head = nn.Linear(embed_dim, 18 * self.patch_size ** 2) if predict_ztd else None
+        self.ztd_head = nn.Linear(embed_dim, 18 * self.patch_size ** 2) if predict_ztd and not predict_delay_components else None
+        self.zhd_head = self.zwd_head = None
+        if predict_delay_components:
+            self.zhd_head = nn.Linear(embed_dim, 18 * self.patch_size ** 2)
+            self.zwd_head = nn.Linear(embed_dim, 18 * self.patch_size ** 2)
+            for head in (self.zhd_head, self.zwd_head):
+                nn.init.zeros_(head.weight)
+                nn.init.zeros_(head.bias)
 
     def forward(
         self,
@@ -298,6 +306,12 @@ class ForecastDecoder(nn.Module):
         x = self.up_block(torch.cat((bottleneck, low_skip), dim=1), temb)
         tokens = rearrange(x, "b c h w -> b (h w) c")
         ztd = None
+        if self.zhd_head is not None:
+            ztd = torch.cat([
+                rearrange(checkpoint.checkpoint(head, tokens, use_reentrant=False),
+                          "b (h w) (p1 p2 t) -> b t 1 (h p1) (w p2)",
+                          h=x.shape[-2], p1=self.patch_size, p2=self.patch_size)
+                for head in (self.zhd_head, self.zwd_head)], dim=2)
         if self.ztd_head is not None:
             ztd = checkpoint.checkpoint(self.ztd_head, tokens, use_reentrant=False)
             ztd = rearrange(ztd, "b (h w) (p1 p2 t) -> b t 1 (h p1) (w p2)",
@@ -342,6 +356,11 @@ class DAForecastNet(nn.Module):
         use_obs: bool = True,
         zero_ztd: bool = False,
         predict_ztd: bool = False,
+        predict_delay_components: bool = False,
+        component_loss_scales: Sequence[float] = (100., 100.),
+        use_delay_physics: bool = False,
+        delay_physics_weight: float = 1.,
+        delay_physics_detach: bool = True,
     ) -> None:
         super().__init__()
         _check_feature_width(embed_dim, num_heads)
@@ -357,6 +376,17 @@ class DAForecastNet(nn.Module):
         self.use_obs = use_obs
         self.zero_ztd = zero_ztd
         self.predict_ztd = predict_ztd
+        self.predict_delay_components = predict_delay_components
+        self.component_loss_scales = tuple(float(v) for v in component_loss_scales)
+        if len(self.component_loss_scales) != 2 or any(not 0 < v < float('inf') for v in self.component_loss_scales):
+            raise ValueError("component_loss_scales must contain two positive finite mm scales")
+        self.use_delay_physics = use_delay_physics
+        self.delay_physics_weight = float(delay_physics_weight)
+        self.delay_physics_detach = delay_physics_detach
+        if predict_delay_components and not predict_ztd:
+            raise ValueError("predict_delay_components requires predict_ztd=true (derived total)")
+        if use_delay_physics and not predict_delay_components:
+            raise ValueError("delay physics requires component mode")
         if predict_ztd and (not use_obs or zero_ztd):
             raise ValueError("predict_ztd requires use_obs=true and zero_ztd=false")
 
@@ -393,7 +423,9 @@ class DAForecastNet(nn.Module):
             num_heads,
             mlp_ratio,
         )
-        self.decoder = ForecastDecoder(embed_dim, out_channels, patch_size, predict_ztd)
+        from .delay_components import ComponentAdapter
+        self.component_adapter = ComponentAdapter(embed_dim, patch_size) if predict_delay_components else None
+        self.decoder = ForecastDecoder(embed_dim, out_channels, patch_size, predict_ztd, predict_delay_components)
 
     def forward(
         self,
@@ -403,6 +435,13 @@ class DAForecastNet(nn.Module):
         obs_ztd: Optional[torch.Tensor] = None,
         obs_mask: Optional[torch.Tensor] = None,
         obs_static: Optional[torch.Tensor] = None,
+        obs_components=None,
+        obs_component_mask=None,
+        ztd_stats=None,
+        station_height=None,
+        station_latitude=None,
+        weather_mean=None,
+        weather_std=None,
     ) -> torch.Tensor:
         if tuple(era5.shape[-2:]) != self.image_size:
             raise ValueError(
@@ -427,6 +466,10 @@ class DAForecastNet(nn.Module):
                 obs_ztd, obs_mask, obs_static
             )
             high = self.high_fusion(high, obs_high, high_mask)
+        if self.predict_delay_components:
+            if obs_components is None or obs_component_mask is None or ztd_stats is None:
+                raise ValueError("component history, masks and physical ZTD normalization are required")
+            high = high + self.component_adapter(obs_components, obs_component_mask).to(high.dtype)
         low = self.era_encoder.encode_low(high, temb)
         if self.use_obs:
             assert self.low_fusion is not None
@@ -436,6 +479,26 @@ class DAForecastNet(nn.Module):
         residual = self.decoder(bottleneck, low, temb)
         if self.predict_ztd:
             weather, ztd = residual
+            if self.predict_delay_components:
+                from .delay_components import component_prediction
+                from .delay_physics import weather_delays_mm
+                weather = era5[:, -1] + weather
+                change = None
+                if self.use_delay_physics:
+                    if any(v is None for v in (station_height, station_latitude, weather_mean, weather_std)):
+                        raise ValueError("physics requires verified station heights/latitudes and ERA normalization")
+                    # FP32 operator, even when the network runs under BF16/FP16.
+                    with torch.autocast(device_type=weather.device.type, enabled=False):
+                        current = weather_delays_mm(era5[:, -1].float(), obs_static, station_height,
+                                                    station_latitude, weather_mean, weather_std)
+                        future = weather_delays_mm(weather.float(), obs_static, station_height,
+                                                   station_latitude, weather_mean, weather_std)
+                        change = (future - current) * self.delay_physics_weight
+                    if self.delay_physics_detach:
+                        change = change.detach()
+                result = component_prediction(ztd, obs_components, obs_component_mask,
+                                              self.component_loss_scales, ztd_stats, change)
+                return {"weather": weather, **result}
             return {"weather": era5[:, -1] + weather, "ztd": ztd}
         return era5[:, -1] + residual
 

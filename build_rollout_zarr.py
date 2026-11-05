@@ -28,6 +28,8 @@ from data.rollout_fields import (
 from evaluate import DistributedEvalSampler, IndexedEvalDataset, load_distributed_model
 from model import DAForecastNet
 from model.ztd_rollout import next_observations, check_ztd_config
+from model.delay_components import COMPONENT_INPUTS, next_component_inputs
+from data.delay_components import component_inputs, read_components
 from train import autocast_settings, load_config, resolve_data_paths, setup_distributed
 
 
@@ -54,7 +56,7 @@ class SourceInputs(DAForecastDataset):
         era = np.asarray(self._era_group["z"][before:current + 1], dtype=np.float32)
         era = np.nan_to_num(era, nan=0.0, posinf=0.0, neginf=0.0)
         obs, mask = self._read_observations(timestamp)
-        return {
+        result = {
             "era5": torch.from_numpy(era),
             "era_static": torch.from_numpy(self.era_static),
             "time_features": torch.from_numpy(time_features(timestamp)),
@@ -62,6 +64,9 @@ class SourceInputs(DAForecastDataset):
             "obs_mask": torch.from_numpy(mask[:, None].astype(np.float32)),
             "obs_static": torch.from_numpy(self.obs_static),
         }
+        if self.predict_delay_components:
+            result.update(component_inputs(self, timestamp))
+        return result
 
 
 def source_datasets(data):
@@ -69,6 +74,9 @@ def source_datasets(data):
         "era5_path", "ztd_path", "conds_path", "global_lat_path", "global_lon_path",
         "obs_history_hours", "obs_interval_minutes",
     )}
+    if data.get("predict_delay_components", False):
+        kwargs.update({k: data[k] for k in ("predict_ztd", "predict_delay_components", "component_loss_scales",
+                      "use_delay_physics", "station_height_path", "station_height_datum", "mean_std_dir") if k in data})
     return {s: SourceInputs(split=data[s + "_split"], **kwargs) for s in SPLITS}
 
 
@@ -76,7 +84,14 @@ def source_metadata(saved, data, amp):
     if int(saved.get("data", {}).get("forecast_lead_hours", 6)) != 6:
         raise ValueError("source checkpoint must be +6h")
     model_config = dict(saved["model"])
-    joint = data.get("rollout_observations", "branch_removed") == "predicted_ztd_at_T"
+    joint = data.get("rollout_observations", "branch_removed") in ("predicted_ztd_at_T", "predicted_components_at_T")
+    if bool(model_config.get("predict_delay_components", False)) != bool(data.get("predict_delay_components", False)):
+        raise ValueError("source checkpoint component mode mismatch")
+    if data.get("predict_delay_components", False):
+        check_ztd_config(data, model_config)
+        for key in ("station_height_path", "station_height_datum", "component_loss_scales"):
+            if saved.get("data", {}).get(key) != data.get(key) and key != "station_height_path":
+                raise ValueError(f"source checkpoint {key} differs from generation config")
     if joint and (not model_config.get("predict_ztd", False) or model_config.get("zero_ztd", False)):
         raise ValueError("predicted-ZTD rollout requires a trained +6h predict_ztd checkpoint, zero_ztd=false")
     zero_ztd = source_observation_policy(data) == "zero_ztd_history_at_T"
@@ -148,6 +163,7 @@ def main():
     data = resolve_data_paths(args.config, config["data"])
     check_ztd_config(data, config["model"])
     joint = bool(config["model"].get("predict_ztd", False))
+    dual = bool(config["model"].get("predict_delay_components", False))
     if int(data.get("forecast_lead_hours", 6)) != 12 or not data.get("rollout_zarr"):
         raise ValueError("requires forecast_lead_hours=12 and data.rollout_zarr")
     output = Path(data["rollout_zarr"]).resolve()
@@ -167,6 +183,9 @@ def main():
     if joint:
         identity["ztd_schema"] = "18_future_20min_frames_v1"
         identity["ztd_normalization"] = datasets["train"].ztd_normalization
+        if dual:
+            identity["ztd_schema"] = "18_future_zhd_zwd_mm_v1"
+            identity["zwd_normalization"] = datasets["train"].zwd_stats.tolist()
     existing = None
     if output.exists():
         existing = open_store(output)
@@ -177,7 +196,7 @@ def main():
     field_bytes = 70 * len(datasets["train"].lat) * len(datasets["train"].lon) * 4
     additional = (len(era_pending) + sum(map(len, forecasts_pending.values()))) * field_bytes
     if joint:
-        additional += sum(map(len, forecasts_pending.values())) * int((datasets["train"].obs_static[0] > 0).sum()) * 37 * 5
+        additional += sum(map(len, forecasts_pending.values())) * int((datasets["train"].obs_static[0] > 0).sum()) * (19 + 2*37 if dual else 37) * 5
     if int(os.environ.get("RANK", 0)) == 0:
         for s in SPLITS:
             print(f"{s}: {len(datasets[s])} origins; selected missing forecasts={len(forecasts_pending.get(s, []))}", flush=True)
@@ -276,10 +295,17 @@ def main():
                         synchronize_error(error, control, world_size)
                         tensors = [batch[k].to(device, non_blocking=True) for k in (
                             "era5", "era_static", "time_features", "obs_ztd", "obs_mask", "obs_static")]
+                        extra = {k: batch[k].to(device, non_blocking=True) for k in COMPONENT_INPUTS if k in batch}
                         with torch.autocast(device_type=device.type, dtype=dtype, enabled=enabled):
-                            model_output = model(*tensors)
+                            model_output = model(*tensors, **extra)
                         if joint:
-                            obs_next, mask_next = next_observations(tensors[3], tensors[4], model_output["ztd"])
+                            next_components = None
+                            if dual:
+                                next_components = next_component_inputs({"obs_ztd": tensors[3], "obs_mask": tensors[4], **extra}, model_output)
+                                obs_next, mask_next = next_components["obs_ztd"], next_components["obs_mask"]
+                                next_components = {k: v.float().cpu().numpy() for k,v in next_components.items()}
+                            else:
+                                obs_next, mask_next = next_observations(tensors[3], tensors[4], model_output["ztd"])
                             obs_next, mask_next = obs_next.float().cpu().numpy(), mask_next.cpu().numpy()
                             prediction = model_output["weather"].float().cpu().numpy()
                         else:
@@ -294,9 +320,16 @@ def main():
                                 payload = None
                                 if joint:
                                     # Future truth is read ONLY after inference and saved as labels.
-                                    target_ztd, target_mask = ds.read_future_ztd(ds.sample_time(local_index) + pd.Timedelta(hours=6))
-                                    payload = dict(ztd_input=obs_next[j], ztd_input_mask=mask_next[j],
-                                                   ztd_target=target_ztd, ztd_target_mask=target_mask)
+                                    target_time = ds.sample_time(local_index) + pd.Timedelta(hours=6)
+                                    payload = dict(ztd_input=obs_next[j], ztd_input_mask=mask_next[j])
+                                    if dual:
+                                        target, target_mask = read_components(ds, target_time, future=True)
+                                        payload.update(component_input=next_components["obs_components"][j],
+                                                       component_input_mask=next_components["obs_component_mask"][j],
+                                                       component_target=target, component_target_mask=target_mask)
+                                    else:
+                                        target_ztd, target_mask = ds.read_future_ztd(target_time)
+                                        payload.update(ztd_target=target_ztd, ztd_target_mask=target_mask)
                                 write_field(root, "z_fuxi6h", index, prediction[j], ztd_payload=payload)
                         except Exception as exc:
                             error = f"forecast write: {type(exc).__name__}: {exc}"

@@ -36,6 +36,7 @@ from model.fuxi import SwinBlock
 from model.fuxi_pretrained import load_fuxi_pretrained
 from model.rollout_init import load_fuxi_core_from_da
 from model.ztd_rollout import check_ztd_config, ztd_mae, ztd_error_sums
+from model.delay_components import COMPONENT_INPUTS, component_aux_loss, component_maes, component_error_sums
 
 
 def parse_args():
@@ -91,8 +92,8 @@ def resolve_data_paths(config_path: str, data_config: dict):
     for key in ("era5_path", "ztd_path", "conds_path", "global_lat_path", "global_lon_path"):
         value = Path(result[key])
         result[key] = str(value if value.is_absolute() else root / value)
-    for key in ("mean_std_dir", "rollout_zarr", "rollout_source_checkpoint"):
-        if key in result:
+    for key in ("mean_std_dir", "rollout_zarr", "rollout_source_checkpoint", "station_height_path"):
+        if result.get(key):
             value = Path(result[key])
             result[key] = str(value if value.is_absolute() else root / value)
     return result
@@ -112,6 +113,8 @@ def make_dataset(data_config: dict, split_name: str):
             raise ValueError("rollout source observation policy differs from config")
         if dataset.predict_ztd != bool(data_config.get("predict_ztd", False)):
             raise ValueError("rollout predict_ztd differs from config")
+        if dataset.predict_delay_components != bool(data_config.get("predict_delay_components", False)):
+            raise ValueError("rollout component mode differs from config")
         return dataset
     kwargs = dict(
         era5_path=data_config["era5_path"],
@@ -123,6 +126,9 @@ def make_dataset(data_config: dict, split_name: str):
         obs_history_hours=data_config["obs_history_hours"],
         obs_interval_minutes=data_config["obs_interval_minutes"],
         predict_ztd=data_config.get("predict_ztd", False),
+        **{k: data_config[k] for k in ("predict_delay_components", "component_loss_scales",
+                                      "use_delay_physics", "station_height_path", "station_height_datum",
+                                      "mean_std_dir") if k in data_config},
     )
     lead = int(data_config.get("forecast_lead_hours", 6))
     if lead != 6:
@@ -232,12 +238,19 @@ def fsdp_mixed_precision(device, mode: str):
 def wrap_fsdp(model, device, train_config):
     """FULL_SHARD the root model and wrap each FuXi Swin block separately."""
     fsdp_config = train_config.get("fsdp", {})
+    precision = fsdp_mixed_precision(device, train_config["amp"])
+    if precision is not None and getattr(model, "predict_delay_components", False):
+        # Root inputs contain physical mm and normalization constants. Never cast
+        # those to BF16: at 2300 mm the quantization step would be 16 mm.
+        # Autocast still handles convolutions/linears; nested Swin wraps cast activations.
+        precision.cast_forward_inputs = False
+        precision.cast_root_forward_inputs = False
     return FSDP(
         model,
         auto_wrap_policy=ModuleWrapPolicy({SwinBlock}),
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
-        mixed_precision=fsdp_mixed_precision(device, train_config["amp"]),
+        mixed_precision=precision,
         device_id=device,
         sync_module_states=bool(fsdp_config.get("sync_module_states", True)),
         forward_prefetch=bool(fsdp_config.get("forward_prefetch", True)),
@@ -254,6 +267,7 @@ def forward_model(model, batch):
         batch["obs_ztd"],
         batch["obs_mask"],
         batch["obs_static"],
+        **{k: batch[k] for k in COMPONENT_INPUTS if k in batch},
     )
 
 
@@ -263,6 +277,9 @@ def joint_losses(prediction, batch, lat, train_config):
         weather, batch["target"], batch["target_mask"], batch["obs_static"], lat,
         train_config["halo_weight"], train_config["halo_radius"],
         train_config.get("loss_mode", "global_plus_halo"))
+    if isinstance(prediction, dict) and "components" in prediction:
+        auxiliary = component_aux_loss(prediction, batch, train_config)
+        return loss + auxiliary, global_loss, halo_loss, auxiliary
     ztd_loss = ztd_mae(prediction["ztd"], batch) if isinstance(prediction, dict) else loss.new_zeros(())
     return loss + float(train_config.get("ztd_loss_weight", 0.1)) * ztd_loss, global_loss, halo_loss, ztd_loss
 
@@ -272,13 +289,19 @@ def validate(model, loader, device, lat, train_config, amp_enabled, amp_dtype, w
     model.eval()
     totals = torch.zeros(4, device=device, dtype=torch.float64)
     ztd_totals = torch.zeros(2, device=device, dtype=torch.float64)
-    joint = False
+    component_totals = torch.zeros(2, 2, device=device, dtype=torch.float64)
+    joint = dual = False
     for batch in loader:
         batch = move_batch(batch, device)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
             prediction = forward_model(model, batch)
             loss, global_loss, halo_loss, ztd_loss = joint_losses(prediction, batch, lat, train_config)
-            if isinstance(prediction, dict):
+            if isinstance(prediction, dict) and "components" in prediction:
+                dual = True
+                sums, counts = component_error_sums(prediction, batch)
+                component_totals += torch.stack((sums.sum(1), counts.sum(1))).double()
+                loss = loss - ztd_loss
+            elif isinstance(prediction, dict):
                 joint = True
                 sums, counts = ztd_error_sums(prediction["ztd"], batch["ztd_target"], batch["ztd_target_mask"])
                 ztd_totals += torch.stack((sums.sum(), counts.sum())).double()
@@ -291,8 +314,15 @@ def validate(model, loader, device, lat, train_config, amp_enabled, amp_dtype, w
     if world_size > 1:
         dist.all_reduce(totals, op=dist.ReduceOp.SUM)
         dist.all_reduce(ztd_totals, op=dist.ReduceOp.SUM)
+        dist.all_reduce(component_totals, op=dist.ReduceOp.SUM)
     result = (totals[:3] / totals[3].clamp_min(1.0)).tolist()
-    if joint:
+    if dual:
+        if (component_totals[1] <= 0).any():
+            raise ValueError("validation has no valid ZHD/ZWD pairs; cannot select a component checkpoint")
+        h, w = (component_totals[0] / component_totals[1].clamp_min(1)).tolist()
+        result[0] += float(train_config.get("zhd_loss_weight", .1))*h + float(train_config.get("zwd_loss_weight", .1))*w
+        result.extend((h, w))
+    elif joint:
         ztd_loss = (ztd_totals[0] / ztd_totals[1].clamp_min(1)).item()
         result[0] += float(train_config.get("ztd_loss_weight", 0.1)) * ztd_loss
         result.append(ztd_loss)
@@ -395,6 +425,13 @@ def apply_freeze_policy(model, train_config):
         module = getattr(model, name)
         if module is not None:
             module.requires_grad_(not train_config.get("freeze_obs", False))
+    adapter = getattr(model, "component_adapter", None)
+    if adapter is not None:
+        adapter.requires_grad_(not train_config.get("freeze_component_adapter", train_config.get("freeze_obs", False)))
+    for name in ("zhd_head", "zwd_head"):
+        head = getattr(model.decoder, name, None)
+        if head is not None:
+            head.requires_grad_(not train_config.get("freeze_delay_heads", False))
     head = getattr(model.decoder, "ztd_head", None)
     if head is not None:
         # Allows a head-only warm-up with the pretrained network frozen.
@@ -409,6 +446,18 @@ def initialize_model_weights(model, checkpoint, model_config, fuxi_only=False):
     for key, default in (("use_obs", True), ("zero_ztd", False)):
         if saved_config.get(key, default) != model_config.get(key, default):
             raise ValueError(f"{key} mismatch between checkpoint and model config")
+    if model_config.get("predict_delay_components", False) and not saved_config.get("predict_delay_components", False):
+        state = dict(checkpoint["model"])
+        discarded = [k for k in state if k in ("decoder.ztd_head.weight", "decoder.ztd_head.bias")]
+        for k in discarded:
+            del state[k]
+        expected = model.state_dict()
+        allowed = {k for k in expected if k.startswith(("component_adapter.", "decoder.zhd_head.", "decoder.zwd_head."))}
+        if set(expected) - set(state) != allowed or set(state) - set(expected):
+            raise ValueError("component initialization may omit ONLY new component heads/adapter")
+        model.load_state_dict({**expected, **state}, strict=True)
+        return {"loaded_tensors": len(state), "discarded_obs_tensors": 0,
+                "discarded_legacy_ztd_head": discarded, "new_component_tensors": sorted(allowed)}
     if model_config.get("predict_ztd", False) and not saved_config.get("predict_ztd", False):
         state = checkpoint["model"]
         expected = model.state_dict()
@@ -422,6 +471,23 @@ def initialize_model_weights(model, checkpoint, model_config, fuxi_only=False):
                 "new_ztd_head_tensors": sorted(missing)}
     model.load_state_dict(checkpoint["model"], strict=True)
     return {"loaded_tensors": len(checkpoint["model"]), "discarded_obs_tensors": 0}
+
+
+def validation_suffix(values):
+    if len(values) == 5:
+        return f" val_zhd_scaled={values[3]:.6f} val_zwd_scaled={values[4]:.6f}"
+    return f" val_ztd={values[3]:.6f}" if len(values) == 4 else ""
+
+
+def batch_loss_suffix(prediction, batch, loss, auxiliary, config):
+    if not isinstance(prediction, dict):
+        return ""
+    if "components" in prediction:
+        h, w = component_maes(prediction, batch).detach().tolist()
+        scales = batch["component_loss_scales"][0].tolist()
+        return (f" weather_loss={(loss-auxiliary).item():.6f}"
+                f" zhd_mae_mm={h*scales[0]:.4f} zwd_mae_mm={w*scales[1]:.4f}")
+    return f" weather_loss={(loss-float(config.get('ztd_loss_weight', .1))*auxiliary).item():.6f} ztd_loss={auxiliary.item():.6f}"
 
 
 def main():
@@ -440,8 +506,18 @@ def main():
     if config["model"].get("predict_ztd", False):
         if args.pretrained_fuxi or args.init_fuxi_only:
             raise ValueError("predict_ztd: use full DA --init-checkpoint, not FuXi-only initialization")
-        if float(train_config.get("ztd_loss_weight", 0.1)) <= 0:
+        if config["model"].get("predict_delay_components", False):
+            if float(train_config.get("ztd_loss_weight", 0)) != 0:
+                raise ValueError("component mode has NO ZTD loss; remove ztd_loss_weight or set it to 0")
+            for key in ("zhd_loss_weight", "zwd_loss_weight"):
+                if not 0 < float(train_config.get(key, .1)) < float("inf"):
+                    raise ValueError(f"{key} must be positive and finite")
+        elif float(train_config.get("ztd_loss_weight", 0.1)) <= 0:
             raise ValueError("ztd_loss_weight must be positive")
+    if train_config.get("checkpoint_metric") == "components" and not config["model"].get("predict_delay_components", False):
+        raise ValueError("checkpoint_metric=components requires component mode")
+    if train_config.get("checkpoint_metric") == "ztd" and config["model"].get("predict_delay_components", False):
+        raise ValueError("component mode selects components/weather_global/total, not ztd")
     if train_config.get("checkpoint_metric", "total") == "ztd" and not config["model"].get("predict_ztd", False):
         raise ValueError("checkpoint_metric=ztd requires predict_ztd")
     if args.init_fuxi_only and (not args.init_checkpoint or config["model"].get("use_obs", True)):
@@ -566,6 +642,11 @@ def main():
                 count = sum(p.numel() for p in module.parameters() if p.requires_grad)
                 print(f"trainable {name}: {count:,}", flush=True)
         head = getattr(model.decoder, "ztd_head", None)
+        if getattr(model, "component_adapter", None) is not None:
+            for name, module in (("component_adapter", model.component_adapter),
+                                 ("decoder.zhd_head", model.decoder.zhd_head),
+                                 ("decoder.zwd_head", model.decoder.zwd_head)):
+                print(f"trainable {name}: {sum(p.numel() for p in module.parameters() if p.requires_grad):,}", flush=True)
         if head is not None:
             print(f"trainable decoder.ztd_head: {sum(p.numel() for p in head.parameters() if p.requires_grad):,}", flush=True)
     if not trainable_parameters:
@@ -610,7 +691,7 @@ def main():
         old_config = saved["config"]
         if data_config.get("rollout_zarr") and old_config.get("rollout_identity") != config["rollout_identity"]:
             raise ValueError("resume rollout source/data identity mismatch")
-        for key in ("freeze_fuxi", "freeze_obs", "freeze_ztd_head"):
+        for key in ("freeze_fuxi", "freeze_obs", "freeze_ztd_head", "freeze_delay_heads", "freeze_component_adapter"):
             if old_config["train"].get(key, False) != train_config.get(key, False):
                 raise ValueError(f"resume {key} mismatch; use --init-checkpoint for a new phase")
         if (old_config.get("data", {}).get("forecast_lead_hours", 6)
@@ -622,6 +703,13 @@ def main():
                 or old_config["train"].get("ztd_loss_weight", 0.1) != train_config.get("ztd_loss_weight", 0.1)
                 or old_config["train"].get("checkpoint_metric", "total") != train_config.get("checkpoint_metric", "total")):
             raise ValueError("resume ZTD objective/metric mismatch; use --init-checkpoint")
+        for section, keys in (("model", ("predict_delay_components", "component_loss_scales", "use_delay_physics",
+                                          "delay_physics_weight", "delay_physics_detach")),
+                              ("data", ("component_loss_scales", "station_height_path", "station_height_datum")),
+                              ("train", ("zhd_loss_weight", "zwd_loss_weight"))):
+            for key in keys:
+                if old_config.get(section, {}).get(key) != config.get(section, {}).get(key):
+                    raise ValueError(f"resume {section}.{key} mismatch; use --init-checkpoint")
         del saved
         checkpoint = load_checkpoint(
             resume_path, model, optimizer, scheduler, rank
@@ -664,11 +752,13 @@ def main():
         if rank == 0:
             print(f"initial validation before updates: val={initial[0]:.6f} "
                   f"val_global={initial[1]:.6f} val_halo={initial[2]:.6f}"
-                  + (f" val_ztd={initial[3]:.6f}" if len(initial) == 4 else ""), flush=True)
+                  + validation_suffix(initial), flush=True)
             with (output_dir / "initial_validation.json").open("w") as handle:
                 initial_metrics = dict(val=initial[0], val_global=initial[1], val_halo=initial[2])
                 if len(initial) == 4:
                     initial_metrics["val_ztd"] = initial[3]
+                if len(initial) == 5:
+                    initial_metrics.update(val_zhd_scaled=initial[3], val_zwd_scaled=initial[4])
                 json.dump(initial_metrics, handle, indent=2)
     for epoch in range(start_epoch, int(train_config["epochs"])):
         if train_sampler is not None:
@@ -712,7 +802,7 @@ def main():
                     f"epoch={epoch + 1} step={optimizer_step} "
                     f"lr={optimizer.param_groups[0]['lr']:.3e} "
                     f"batch_loss={loss.item():.6f}"
-                    + (f" weather_loss={(loss - float(train_config.get('ztd_loss_weight', 0.1)) * ztd_loss).item():.6f} ztd_loss={ztd_loss.item():.6f}" if isinstance(prediction, dict) else ""),
+                    + batch_loss_suffix(prediction, batch, loss, ztd_loss, train_config),
                     flush=True,
                 )
             running[0] += loss.detach().double()
@@ -726,9 +816,11 @@ def main():
         )
         val_loss, val_global, val_halo = validation[:3]
         metric = train_config.get("checkpoint_metric", "total")
-        if metric not in ("total", "weather_global", "ztd"):
-            raise ValueError("checkpoint_metric must be total, weather_global or ztd")
+        if metric not in ("total", "weather_global", "ztd", "components"):
+            raise ValueError("checkpoint_metric must be total, weather_global, ztd or components")
         selection = val_global if metric == "weather_global" else (validation[3] if metric == "ztd" else val_loss)
+        if metric == "components":
+            selection = float(train_config.get("zhd_loss_weight", .1))*validation[3] + float(train_config.get("zwd_loss_weight", .1))*validation[4]
         improved = selection < best_val
         if improved:
             best_val = selection
@@ -740,7 +832,7 @@ def main():
                 f"lr={lr:.3e} train={train_loss:.6f} val={val_loss:.6f} "
                 f"val_global={val_global:.6f} val_halo={val_halo:.6f} "
                 f"seconds={elapsed:.1f}"
-                + (f" val_ztd={validation[3]:.6f} checkpoint_metric={metric}" if len(validation) == 4 else ""),
+                + validation_suffix(validation) + f" checkpoint_metric={metric}",
                 flush=True,
             )
         checkpoint_paths = [output_dir / "last.pt"]

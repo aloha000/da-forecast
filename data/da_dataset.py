@@ -162,10 +162,19 @@ class DAForecastDataset(Dataset):
         obs_history_hours: int = 6,
         obs_interval_minutes: int = 20,
         predict_ztd: bool = False,
+        predict_delay_components: bool = False,
+        component_loss_scales=(100., 100.),
+        use_delay_physics=False,
+        station_height_path=None,
+        station_height_datum=None,
+        mean_std_dir=None,
     ) -> None:
         super().__init__()
         self.lead_hours = 6
         self.predict_ztd = bool(predict_ztd)
+        self.predict_delay_components = bool(predict_delay_components)
+        if self.predict_delay_components and not self.predict_ztd:
+            raise ValueError("component mode requires predict_ztd=true")
         if self.predict_ztd and (obs_history_hours != 6 or obs_interval_minutes != 20):
             raise ValueError("ZTD prediction requires 6h history / 20min spacing")
         self.era5_path = str(Path(era5_path))
@@ -214,6 +223,10 @@ class DAForecastDataset(Dataset):
         )
         self.lat = target_lat.astype(np.float32)
         self.lon = target_lon.astype(np.float32)
+        if self.predict_delay_components:
+            from .delay_components import setup_components
+            setup_components(self, ztd_group, component_loss_scales, use_delay_physics,
+                             station_height_path, station_height_datum, mean_std_dir)
 
         start, end = pd.Timestamp(split[0]), pd.Timestamp(split[1])
         lead = pd.Timedelta(hours=self.lead_hours)
@@ -338,7 +351,13 @@ class DAForecastDataset(Dataset):
             "target": torch.from_numpy(target),
             "target_mask": torch.from_numpy(target_valid.astype(np.float32)),
         }
-        if self.predict_ztd:
+        if self.predict_delay_components:
+            from .delay_components import component_inputs, read_components
+            result.update(component_inputs(self, timestamp))
+            values, mask = read_components(self, timestamp, future=True)
+            result.update(component_target=torch.from_numpy(values), component_target_mask=torch.from_numpy(mask),
+                          component_loss_scales=torch.from_numpy(self.component_loss_scales.copy()))
+        elif self.predict_ztd:
             target_ztd, mask = self.read_future_ztd(timestamp)
             result.update(ztd_target=torch.from_numpy(target_ztd), ztd_target_mask=torch.from_numpy(mask))
         return result
