@@ -1,5 +1,9 @@
 # da-forecast
 
+新增：ZHD/ZWD 双通道观测输入，起报后关闭 OBS，同一 6h 模型逐步训练到 48h；
+8 个阶段、每阶段 500 次优化器更新。使用 `train_rollout.py` / `evaluate_rollout.py`，
+配置和后台命令见 [ROLLOUT_48H_ZHD_ZWD.md](ROLLOUT_48H_ZHD_ZWD.md)。不预测延迟，不生成新 Zarr。
+
 6h 零 ZTD 实验第二阶段（冻结 OBS/gate、微调 FuXi）：配置和后台命令见
 [ZERO_ZTD_STAGE2.md](ZERO_ZTD_STAGE2.md)。这是 6h 微调，不使用 rollout Zarr。
 

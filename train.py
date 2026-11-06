@@ -387,8 +387,23 @@ def initialize_model_weights(model, checkpoint, model_config, fuxi_only=False):
     for key, default in (("use_obs", True), ("zero_ztd", False)):
         if saved_config.get(key, default) != model_config.get(key, default):
             raise ValueError(f"{key} mismatch between checkpoint and model config")
-    model.load_state_dict(checkpoint["model"], strict=True)
-    return {"loaded_tensors": len(checkpoint["model"]), "discarded_obs_tensors": 0}
+    state = checkpoint["model"]
+    old_channels = int(saved_config.get("obs_channels", 1))
+    new_channels = int(model_config.get("obs_channels", 1))
+    if old_channels == 1 and new_channels == 2:
+        # New normalized H+W equals old normalized ZTD (same total std).
+        # Conv inputs: old [ZTD,mask] -> new [ZHD,ZWD,paired_mask].
+        key = "obs_encoder.temporal.0.weight"
+        state = dict(state)
+        kernel = state[key]
+        if kernel.shape[1] != 2:
+            raise ValueError("expected old ZTD+mask convolution")
+        state[key] = torch.cat((kernel[:, :1], kernel[:, :1], kernel[:, 1:2]), dim=1)
+    elif old_channels != new_channels:
+        raise ValueError("unsupported observation channel migration")
+    model.load_state_dict(state, strict=True)
+    return {"loaded_tensors": len(state), "discarded_obs_tensors": 0,
+            "observation_channels": [old_channels, new_channels]}
 
 
 def main():
@@ -403,6 +418,10 @@ def main():
     config = load_config(args.config)
     data_config = resolve_data_paths(args.config, config["data"])
     train_config = config["train"]
+    if "curriculum" in config:
+        raise ValueError("use train_rollout.py for online multi-step curriculum training")
+    if int(config["model"].get("obs_channels", 1)) != 1:
+        raise ValueError("use train_rollout.py for ZHD/ZWD observation inputs")
     if args.init_fuxi_only and (not args.init_checkpoint or config["model"].get("use_obs", True)):
         raise ValueError("--init-fuxi-only requires --init-checkpoint and model.use_obs=false")
     if data_config.get("rollout_zarr"):

@@ -659,6 +659,8 @@ def main():
         dist.broadcast_object_list(checkpoint_metadata, src=0)
     checkpoint_config = checkpoint_metadata[0]
     model_config = checkpoint_config["model"]
+    if int(model_config.get("obs_channels", 1)) != 1:
+        raise ValueError("use evaluate_rollout.py for ZHD/ZWD online rollout checkpoints")
     checkpoint_train = checkpoint_config["train"]
     if int(checkpoint_config["data"].get("forecast_lead_hours", 6)) != lead_hours:
         raise ValueError("checkpoint forecast lead differs from dataset configuration")

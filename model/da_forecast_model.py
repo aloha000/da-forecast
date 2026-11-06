@@ -101,13 +101,17 @@ class ObsEncoder(nn.Module):
         embed_dim: int = 256,
         patch_size: int = 4,
         temporal_channels: Tuple[int, int] = (32, 64),
+        obs_channels: int = 1,
     ) -> None:
         super().__init__()
         self.obs_static_channels = obs_static_channels
         self.patch_size = patch_size
+        if obs_channels not in (1, 2):
+            raise ValueError("obs_channels must be 1 (ZTD) or 2 (ZHD,ZWD)")
+        self.obs_channels = obs_channels
         mid_channels, out_channels = temporal_channels
         self.temporal = nn.Sequential(
-            nn.Conv3d(2, mid_channels, 3, padding=1),
+            nn.Conv3d(obs_channels + 1, mid_channels, 3, padding=1),
             nn.SiLU(),
             nn.Conv3d(mid_channels, out_channels, 3, padding=1),
             nn.SiLU(),
@@ -128,8 +132,8 @@ class ObsEncoder(nn.Module):
         obs_mask: torch.Tensor,
         obs_static: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if obs_ztd.ndim != 5 or obs_ztd.shape[2] != 1:
-            raise ValueError("obs_ztd must have shape [B, T, 1, H, W]")
+        if obs_ztd.ndim != 5 or obs_ztd.shape[2] != self.obs_channels:
+            raise ValueError(f"observations must have shape [B,T,{self.obs_channels},H,W]")
         if obs_mask.shape != obs_ztd.shape:
             raise ValueError("obs_mask must have the same shape as obs_ztd")
         b, _, _, h, w = obs_ztd.shape
@@ -141,7 +145,7 @@ class ObsEncoder(nn.Module):
 
         # Treat every non-positive value as missing and prevent NaNs in the
         # supplied ZTD array from entering the convolution.
-        mask = ((obs_mask > 0) & torch.isfinite(obs_ztd)).to(dtype=obs_ztd.dtype)
+        mask = ((obs_mask > 0) & torch.isfinite(obs_ztd)).all(dim=2, keepdim=True).to(dtype=obs_ztd.dtype)
         ztd = torch.where(mask.bool(), obs_ztd, torch.zeros_like(obs_ztd))
         temporal_input = torch.cat((ztd * mask, mask), dim=2).permute(0, 2, 1, 3, 4)
         features = self.temporal(temporal_input)
@@ -329,7 +333,8 @@ class DAForecastNet(nn.Module):
         mlp_ratio: float = 4.0,
         time_dim: int = 12,
         use_obs: bool = True,
-        zero_ztd: bool = False
+        zero_ztd: bool = False,
+        obs_channels: int = 1,
     ) -> None:
         super().__init__()
         _check_feature_width(embed_dim, num_heads)
@@ -344,6 +349,7 @@ class DAForecastNet(nn.Module):
         self.patch_size = patch_size
         self.use_obs = use_obs
         self.zero_ztd = zero_ztd
+        self.obs_channels = int(obs_channels)
 
         scale = patch_size * 2
         if any(v % scale != 0 for v in self.image_size):
@@ -362,7 +368,7 @@ class DAForecastNet(nn.Module):
         )
         if use_obs:
             self.obs_encoder: Optional[ObsEncoder] = ObsEncoder(
-                obs_static_channels, embed_dim, patch_size
+                obs_static_channels, embed_dim, patch_size, obs_channels=self.obs_channels
             )
             self.high_fusion: Optional[GatedFusion] = GatedFusion(embed_dim)
             self.low_fusion: Optional[GatedFusion] = GatedFusion(embed_dim)
@@ -388,6 +394,7 @@ class DAForecastNet(nn.Module):
         obs_ztd: Optional[torch.Tensor] = None,
         obs_mask: Optional[torch.Tensor] = None,
         obs_static: Optional[torch.Tensor] = None,
+        obs_enabled: bool = True,
     ) -> torch.Tensor:
         if tuple(era5.shape[-2:]) != self.image_size:
             raise ValueError(
@@ -398,7 +405,8 @@ class DAForecastNet(nn.Module):
         temb = self.time_embed(time_features.to(era5))
         high = self.era_encoder.encode_high(era5, era_static)
 
-        if self.use_obs:
+        active_obs = self.use_obs and obs_enabled
+        if active_obs:
             if obs_ztd is None or obs_mask is None or obs_static is None:
                 raise ValueError(
                     "obs_ztd, obs_mask and obs_static are required when use_obs=True"
@@ -413,7 +421,7 @@ class DAForecastNet(nn.Module):
             )
             high = self.high_fusion(high, obs_high, high_mask)
         low = self.era_encoder.encode_low(high, temb)
-        if self.use_obs:
+        if active_obs:
             assert self.low_fusion is not None
             low = self.low_fusion(low, obs_low, low_mask)
 
