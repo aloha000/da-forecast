@@ -64,6 +64,7 @@ def main():
                 "amp":saved["train"]["amp"],"world_size":world,"split":args.split,
                 "origin_first":str(ds.sample_time(0)),"origin_last":str(ds.sample_time(len(ds)-1)),
                 "observation_normalization":ds.observation_normalization}
+    provenance["zero_delay_inputs"] = ds.zero_delay_inputs
     if rank==0:
         print(json.dumps(provenance,indent=2),flush=True)
         if args.steps>saved["curriculum_state"]["stage"]:

@@ -85,6 +85,10 @@ def main():
     val_dataset=make_rollout_dataset(data,"val",max_steps,1)
     config["observation_normalization"]=dataset.observation_normalization
     config["rollout_data_identity"]=data_identity(data)
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(f"zero_delay_inputs={dataset.zero_delay_inputs}: "
+              "origin ZHD/ZWD values only; masks/static fields and OBS/gates retained; "
+              "later hops bypass OBS", flush=True)
     if args.check_data:
         # Inspect one horizon only; all origins already checked through max_steps.
         sample=dataset[0]

@@ -26,7 +26,10 @@ def split_delays(ztd, zwd, total_stats, wet_stats):
     return np.where(valid,h,np.nan).astype(np.float32), np.where(valid,w,np.nan).astype(np.float32)
 
 class RolloutSequenceDataset(DAForecastDataset):
-    def __init__(self, *, max_steps=8, horizon=1, **kwargs):
+    def __init__(self, *, max_steps=8, horizon=1, zero_delay_inputs=False, **kwargs):
+        if not isinstance(zero_delay_inputs, bool):
+            raise ValueError("zero_delay_inputs must be a boolean")
+        self.zero_delay_inputs = zero_delay_inputs
         super().__init__(**kwargs)
         self.max_steps,self.horizon=int(max_steps),int(horizon)
         if not 1<=self.horizon<=self.max_steps<=8:
@@ -78,6 +81,10 @@ class RolloutSequenceDataset(DAForecastDataset):
         era=np.nan_to_num(sequence[:2],nan=0.,posinf=0.,neginf=0.)
         targets=np.where(valid,targets,0).astype(np.float32)
         obs,mask=self._read_components(t) # NO observations after T are read.
+        # Ablate values only, AFTER normalization and paired-valid mask creation.
+        # Retain sampling, masks, static fields and all OBS/fusion parameters.
+        if self.zero_delay_inputs:
+            obs.fill(0.)
         return {"era5":torch.from_numpy(era),"targets":torch.from_numpy(targets),
                 "target_masks":torch.from_numpy(valid),
                 "era_static":torch.from_numpy(self.era_static),"obs_ztd":torch.from_numpy(obs),
@@ -91,4 +98,5 @@ def make_rollout_dataset(data,split,max_steps=8,horizon=1):
     keys=("era5_path","ztd_path","conds_path","global_lat_path","global_lon_path",
           "obs_history_hours","obs_interval_minutes")
     return RolloutSequenceDataset(**{k:data[k] for k in keys},split=data[split+"_split"],
+                                  zero_delay_inputs=data.get("zero_delay_inputs",False),
                                   max_steps=max_steps,horizon=horizon)

@@ -25,6 +25,27 @@ def dual_model():
                         depths=(1,),num_heads=4,obs_channels=2)
 
 class RolloutUnitTest(unittest.TestCase):
+    def test_zero_delay_config_preserves_model_and_train_settings(self):
+        root=Path(__file__).resolve().parents[1]
+        original=json.loads((root/"configs/train_rollout_48h_zhd_zwd.json").read_text())
+        ablation=json.loads((root/"configs/train_rollout_48h_zero_zhd_zwd.json").read_text())
+        self.assertTrue(ablation["data"].pop("zero_delay_inputs"))
+        ablation["train"]["output_dir"]=original["train"]["output_dir"]
+        self.assertEqual(original,ablation)
+        # No architectural setting changes: parameter shapes/count are identical.
+        model=dual_model()
+        parameters=sum(p.numel() for p in model.parameters())
+        inputs=mf.make_inputs()
+        inputs.update(obs_ztd=torch.zeros(1,3,2,40,40),
+                      obs_mask=torch.ones(1,3,2,40,40))
+        with patch.object(model.obs_encoder,"forward",wraps=model.obs_encoder.forward) as obs:
+            model(**inputs).square().mean().backward()
+            obs.assert_called_once()
+        self.assertEqual(sum(p.numel() for p in model.parameters()),parameters)
+        self.assertTrue(all(p.requires_grad for p in model.parameters()))
+        self.assertTrue(any(p.grad is not None and p.grad.abs().sum()>0
+                            for p in model.obs_encoder.parameters()))
+
     def test_component_units_pair_mask_and_preserved_sum(self):
         total=np.array([1.,2.,np.nan],np.float32)
         wet=np.array([3.,np.nan,1.],np.float32)
@@ -118,6 +139,38 @@ class TinyWeather(torch.nn.Module):
         return era[:,-1]+delta+noise
 
 class CurriculumPipelineTest(unittest.TestCase):
+    def test_zero_delay_values_only_all_splits_and_identity(self):
+        from data.rollout_identity import data_identity
+        ablated={**self.data,"zero_delay_inputs":True}
+        self.assertNotEqual(data_identity(self.data),data_identity(ablated))
+        self.assertEqual(data_identity(self.data),data_identity({**self.data,"zero_delay_inputs":False}))
+        for split in ("train","val","test"):
+            reference=make_rollout_dataset(self.data,split,8,8)
+            zero=make_rollout_dataset(ablated,split,8,8)
+            self.assertTrue(reference.analysis_times.equals(zero.analysis_times))
+            a,b=reference[0],zero[0]
+            self.assertGreater(a["obs_ztd"].abs().sum(),0)
+            self.assertEqual(b["obs_ztd"].shape,a["obs_ztd"].shape)
+            self.assertEqual(torch.count_nonzero(b["obs_ztd"]).item(),0)
+            for key in a:
+                if key!="obs_ztd":
+                    torch.testing.assert_close(a[key],b[key],rtol=0,atol=0)
+        with self.assertRaisesRegex(ValueError,"boolean"):
+            make_rollout_dataset({**self.data,"zero_delay_inputs":"false"},"train")
+
+    def test_zero_delay_resume_and_evaluation_mismatch_rejected(self):
+        self.run_train("--stop-after-updates","1")
+        self.config["data"]["zero_delay_inputs"]=True
+        self.path.write_text(json.dumps(self.config))
+        checkpoint=str(self.root/"run/last.pt")
+        with self.assertRaisesRegex(ValueError,"rollout_data_identity"):
+            self.run_train("--resume",checkpoint)
+        args=["evaluate_rollout.py","--config",str(self.path),"--checkpoint",checkpoint,
+              "--output-dir",str(self.root/"eval_zero")]
+        with patch.object(evaluator,"setup_rollout_distributed",return_value=(0,1,torch.device("cpu"))),patch("sys.argv",args):
+            with self.assertRaisesRegex(ValueError,"identity differs"):
+                evaluator.main()
+
     def setUp(self):
         fixtures.TwoFieldTest.setUp(self)
         obs=zarr.open_group(self.data["ztd_path"],mode="r+")

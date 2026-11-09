@@ -16,6 +16,12 @@ def data_identity(config):
         "train_split", "val_split", "test_split",
     )}
     hashes = {}
+    zero_delay_inputs = config.get("zero_delay_inputs", False)
+    if not isinstance(zero_delay_inputs, bool):
+        raise ValueError("zero_delay_inputs must be a boolean")
+    # Omit the default to keep existing non-ablation checkpoints compatible.
+    if zero_delay_inputs:
+        result["zero_delay_inputs"] = True
     paths = [config[k] for k in ("conds_path", "global_lat_path", "global_lon_path")]
     paths += [str(Path(config["mean_std_dir"]) / f"{name}_era5.npy") for name in ("mean", "std")]
     for value in paths:
