@@ -361,6 +361,7 @@ class DAForecastNet(nn.Module):
         use_delay_physics: bool = False,
         delay_physics_weight: float = 1.,
         delay_physics_detach: bool = True,
+        zero_delay_inputs: bool = False,
     ) -> None:
         super().__init__()
         _check_feature_width(embed_dim, num_heads)
@@ -375,6 +376,7 @@ class DAForecastNet(nn.Module):
         self.patch_size = patch_size
         self.use_obs = use_obs
         self.zero_ztd = zero_ztd
+        self.zero_delay_inputs = zero_delay_inputs
         self.predict_ztd = predict_ztd
         self.predict_delay_components = predict_delay_components
         self.component_loss_scales = tuple(float(v) for v in component_loss_scales)
@@ -389,6 +391,8 @@ class DAForecastNet(nn.Module):
             raise ValueError("delay physics requires component mode")
         if predict_ztd and (not use_obs or zero_ztd):
             raise ValueError("predict_ztd requires use_obs=true and zero_ztd=false")
+        if zero_delay_inputs and (not predict_delay_components or not use_obs):
+            raise ValueError("zero_delay_inputs requires active OBS and component prediction")
 
         scale = patch_size * 2
         if any(v % scale != 0 for v in self.image_size):
@@ -449,6 +453,17 @@ class DAForecastNet(nn.Module):
             )
         if time_features.ndim != 2 or time_features.shape != (era5.shape[0], 12):
             raise ValueError("time_features must have shape [B,12]")
+        if self.zero_delay_inputs:
+            if any(v is None for v in (obs_ztd, obs_mask, obs_components, obs_component_mask)):
+                raise ValueError("zero_delay_inputs requires delay histories and masks")
+            # Apply on EVERY forward (including predicted-history rollout hops).
+            # Retain availability/static information, never mutate data or labels.
+            obs_mask = ((obs_mask > 0) & torch.isfinite(obs_ztd)).to(obs_mask.dtype)
+            obs_component_mask = ((obs_component_mask > 0) &
+                                  torch.isfinite(obs_components)).to(obs_component_mask.dtype)
+            obs_ztd = torch.zeros_like(obs_ztd)  # Zero in encoder/normalized space.
+            obs_components = torch.zeros_like(obs_components)  # Physical mm = 0.
+            # The SAME zero history is used by adapter AND residual prediction base.
         temb = self.time_embed(time_features.to(era5))
         high = self.era_encoder.encode_high(era5, era_static)
 

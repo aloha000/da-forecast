@@ -47,7 +47,7 @@
 
 已核对该文件配置含 ZHD/ZWD 双头且物理算子关闭。只加载权重，curriculum 的优化器和更新计数从头开始。可通过 --init-checkpoint 指定兼容权重。本次并非重新开始纯 FuXi 预训练；与 main 实验做严格因果对照时还需控制初始化历史和所有其他训练条件。
 
-当前只实现真实观测起报、预测观测反馈的实验。不要套用 main 的 data.zero_delay_inputs 开关（会明确拒绝），也不要只置零 ZTD 而保留真实分量残差基线；完整消融需要另外定义和实现。
+默认仍为真实观测起报、预测观测反馈。全零输入消融现已实现，见第 9 节；不要套用 main 的 data.zero_delay_inputs，也不要单独开启旧 model.zero_ztd。
 
 ## 4. 启动前检查
 
@@ -134,3 +134,50 @@ nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 python -u -m torch.distributed.run \
 - 小型真实网络 8 步、两进程 CPU FSDP、每次更新累积 2 个 microbatch，运行 2 次更新成功；跨步重计算与反向传播正常。
 - 真实数据起报时段筛选和一个 6h 样本形状/有限值检查通过。
 - 未启动正式训练，未在全球尺寸上验证 8 步 GPU 显存或收敛。请先运行短测试。
+
+## 9. ZTD、ZHD、ZWD 全零输入消融
+
+配置：`configs/train_rollout_48h_predict_delays_zero_inputs.json`。
+
+- `model.zero_delay_inputs=true`，`curriculum.observation_policy="zero_all_steps"`。
+- 保持 `use_obs=true`、`zero_ztd=false`、两个预测头开启，保留全部网络模块和参数。
+- 每次 model.forward（第一步及所有后续步）都把 ZTD 编码器输入置为标准化空间的 0，把 ZHD/ZWD 历史置为物理空间的 0 mm；不是先在原始 ZTD 上填 0 再标准化。
+- Adapter 和分量预测残差基线共同使用清零后的历史，防止真实分量从残差基线进入预测。
+- mask、站点静态场、ERA5、日期信息和真实监督标签不变。并非去掉站点位置/可用性信息的消融。
+- 分量仍然预测并接受真实标签监督，ZTD 仍由二者相加得到；输出不强制置零。但下一步送入网络时再次清零，所以延迟数值反馈的跨步梯度被切断，天气反馈仍完整反传。
+- 物理算子仍关闭。分量预测变成 `0 + 100 mm × 预测残差`，因此初期 ZHD MAE/总 loss 可能显著增大。该实验同时移除了观测残差基线；它不是仅测试 Encoder 融合贡献的对照。
+- 与原实验使用同一 6h 初始权重、数据划分、随机种子、损失、学习率、4 卡 FSDP、每卡 batch=1、累积 8。共 8 阶段，每阶段 500 次更新。
+- 不从已完成的 48h 实验继续训练；输出到新目录，原实验不覆盖。初始 6h 权重曾使用真实观测，此对照检验共同初始化下的零输入训练，不代表全训练历史从未接触观测。
+- 开关写入 checkpoint 配置；`evaluate_rollout_delays.py` 从 checkpoint 构建模型，所以测试自动执行同样的全零策略。评估中的真实观测 persistence 仅为独立参考，不进入模型。
+
+在 gnss 环境中正式启动：
+
+```bash
+cd /inspire/ssd/project/sais-weather/public/linan/da-forecast
+export LD_PRELOAD=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/libstdc++.so.6
+mkdir -p work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs
+nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 python -u -m torch.distributed.run \
+  --standalone --nproc_per_node=4 train_rollout_delays.py \
+  --config configs/train_rollout_48h_predict_delays_zero_inputs.json \
+  >> work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs/train.log 2>&1 < /dev/null &
+```
+
+建议先用相同命令添加以下参数测试 8 个阶段，输出必须用独立目录（并相应修改日志重定向目录）：
+
+```text
+--updates-per-stage 1 --gradient-accumulation 1 --overfit-samples 8
+--output-dir work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs_smoke
+```
+
+测试集评估（先执行上述 cd 和 export）：
+
+```bash
+mkdir -p work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs/test
+nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 python -u -m torch.distributed.run \
+  --standalone --nproc_per_node=4 evaluate_rollout_delays.py \
+  --config configs/train_rollout_48h_predict_delays_zero_inputs.json \
+  --checkpoint work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs/stage_48h/best.pt \
+  --split test --steps 8 --batch-size 1 --num-workers 1 \
+  --output-dir work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs/test \
+  >> work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs/test/evaluate.log 2>&1 < /dev/null &
+```

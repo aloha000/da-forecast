@@ -26,7 +26,7 @@ def validate_config(config):
     if not m.get("predict_delay_components"):
         raise ValueError("joint rollout requires weather + ZHD/ZWD heads")
     if config["data"].get("zero_delay_inputs"):
-        raise ValueError("zero-input ablation not supported in this rollout config")
+        raise ValueError("use model.zero_delay_inputs, not data.zero_delay_inputs; retain true labels")
     if c.get("loss_aggregation")!="mean_all_active_leads":
         raise ValueError("loss_aggregation must be mean_all_active_leads")
     if t.get("checkpoint_metric")!="weather_global":
@@ -38,8 +38,9 @@ def validate_config(config):
         raise ValueError("no independent ZTD loss in component rollout")
     if not 1<=int(c["max_steps"])<=8 or int(c["updates_per_stage"])<1:
         raise ValueError("invalid curriculum limits")
-    if c.get("observation_policy")!="predicted_components":
-        raise ValueError("observation_policy must be predicted_components")
+    expected_policy = "zero_all_steps" if m.get("zero_delay_inputs", False) else "predicted_components"
+    if c.get("observation_policy") != expected_policy:
+        raise ValueError(f"observation_policy must be {expected_policy}")
     if t.get("loss_mode")!="global_only":
         raise ValueError("this curriculum uses global_only weather supervision")
     if any(t.get(k,False) for k in ("freeze_fuxi","freeze_obs","freeze_delay_heads","freeze_component_adapter")):
@@ -97,8 +98,11 @@ def main():
     config["observation_normalization"]=dataset.observation_normalization
     config["rollout_data_identity"]=data_identity(data)
     if int(os.environ.get("RANK", "0")) == 0:
-        print("OBS policy: real history at T; predicted ZHD/ZWD and derived ZTD at later hops; "
-              "shared model, all branches/heads trainable", flush=True)
+        policy = ("ZTD(normalized)=0, ZHD/ZWD(mm)=0 at EVERY hop, including residual base; "
+                  "retain masks/static fields and true supervision"
+                  if config["model"].get("zero_delay_inputs", False) else
+                  "real history at T; predicted ZHD/ZWD and derived ZTD at later hops")
+        print(f"OBS policy: {policy}; shared model, all branches/heads trainable", flush=True)
     if args.check_data:
         # Inspect one horizon only; all origins already checked through max_steps.
         sample=dataset[0]
@@ -106,7 +110,8 @@ def main():
         print(json.dumps(dataset.observation_normalization,indent=2))
         for key,value in sample.items():
             print(key,tuple(value.shape),value.dtype,bool(torch.isfinite(value).all()))
-        print("Future observations are supervision ONLY; recurrent inputs use predictions.")
+        print("Future observations are supervision ONLY. Shapes above are raw dataset tensors; "
+              "model.zero_delay_inputs, when enabled, zeros histories inside every model forward.")
         return
     rank,world,device=setup_rollout_distributed()
     fsdp=bool(tc.get("fsdp",{}).get("enabled",True))
