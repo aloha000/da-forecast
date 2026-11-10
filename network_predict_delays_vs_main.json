@@ -1,0 +1,19 @@
+{
+  "main_commit": "dcbb37ce5429acb7adf3542adae68c87788036b7",
+  "current_branch": "predict_ztd",
+  "current_model_sha256": "d2ccaf172eddc3e97f334983fac923de4a957f30be9c07ebd922591369ce7187",
+  "main_parameters": 1792051552,
+  "current_parameters": 1793084992,
+  "net_added_parameters": 1033440,
+  "current_added_modules": {
+    "component_adapter": 148992,
+    "decoder.zhd_head": 442656,
+    "decoder.zwd_head": 442656
+  },
+  "obs_first_conv_parameter_difference": -864,
+  "configs": [
+    "main:configs/train_rollout_48h_zhd_zwd.json",
+    "configs/train_rollout_48h_predict_delays.json"
+  ],
+  "note": "Counts are nn.Parameter only, not buffers. Both configs unfreeze all active modules."
+}

@@ -500,6 +500,8 @@ def main():
     if sum(value is not None for value in load_options) > 1:
         raise ValueError("--resume,--pretrained-fuxi and --init-checkpoint can not be used together")
     config = load_config(args.config)
+    if "curriculum" in config:
+        raise ValueError("joint 48h curriculum: use train_rollout_delays.py")
     data_config = resolve_data_paths(args.config, config["data"])
     train_config = config["train"]
     check_ztd_config(data_config, config["model"])

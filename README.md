@@ -1,5 +1,10 @@
 # da-forecast
 
+48h 在线联合 rollout：预测气象场和未来 18 帧 ZHD/ZWD，后续步骤输入预测值；
+共享模型，8 个阶段，每阶段 500 次更新，无离线缓存。使用独立入口
+`train_rollout_delays.py` / `evaluate_rollout_delays.py`，详见
+[ROLLOUT_48H_PREDICT_DELAYS.md](ROLLOUT_48H_PREDICT_DELAYS.md)。
+
 新实验：只监督未来 18 帧 **ZHD/ZWD**，ZTD 由两项相加得到；
 观测基线 + 零初始化残差头 + 可选气象算子。请使用
 [PREDICT_DELAYS.md](PREDICT_DELAYS.md) 中的独立配置与命令，

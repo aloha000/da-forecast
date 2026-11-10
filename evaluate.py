@@ -616,6 +616,8 @@ def main():
             plot_channel_mae_comparison(args.output_dir, args.fuxi_reference)
         return
     config = load_config(args.config)
+    if "curriculum" in config:
+        raise ValueError("joint 48h curriculum: use evaluate_rollout_delays.py")
     data_config = resolve_data_paths(args.config, config["data"])
     lead_hours = int(data_config.get("forecast_lead_hours", 6))
     if args.fuxi_reference is not None and not args.skip_mae_plots:
