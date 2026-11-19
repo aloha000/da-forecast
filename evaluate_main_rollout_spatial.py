@@ -187,6 +187,9 @@ def evaluate_variant(args,variant,rank,world,device,rt):
     del ck
     config=dict(saved["train"]);config["fsdp"]={**config["fsdp"],"sync_module_states":True,"forward_prefetch":False}
     network=training.wrap_fsdp(network,device,config);network.eval()
+    print(f"{variant}: rank={rank} model ready; CUDA allocated="
+          f"{torch.cuda.memory_allocated(device)/2**30:.2f}GiB reserved="
+          f"{torch.cuda.memory_reserved(device)/2**30:.2f}GiB",flush=True)
     mean=torch.as_tensor(np.load(Path(cfg["mean_std_dir"])/"mean_era5.npy").reshape(-1)[INDICES],
                          device=device,dtype=torch.float32).view(1,-1,1,1)
     std=torch.as_tensor(np.load(Path(cfg["mean_std_dir"])/"std_era5.npy").reshape(-1)[INDICES],
@@ -197,6 +200,19 @@ def evaluate_variant(args,variant,rank,world,device,rt):
     started=time.monotonic();start_done=done
     selection=torch.tensor(INDICES,device=device)
     for batch in loader:
+        if args.gpu_memory_limit_gib is not None:
+            free,_=torch.cuda.mem_get_info(device)
+            # Own cached allocator blocks can be reused by this process; leave
+            # 8GiB outside the requested cap for training growth/CUDA overhead.
+            headroom=free+torch.cuda.memory_reserved(device)
+            safe=torch.tensor(int(headroom>=args.gpu_memory_limit_gib*2**30+8*2**30),device=device)
+            dist.all_reduce(safe,op=dist.ReduceOp.MIN)
+            if not bool(safe):
+                atomic_npz(partial,identity=np.asarray(identity_json),done=np.asarray(done),
+                           num_samples=np.asarray(num_samples),error_normalized=errors_n.cpu().numpy(),
+                           error_physical=errors_p.cpu().numpy(),count=counts.cpu().numpy())
+                dist.barrier()
+                raise RuntimeError("training memory headroom below guard; evaluation progress saved, stopping")
         batch={k:v.to(device) for k,v in batch.items()}
         history=batch["era5"]
         with torch.autocast("cuda",dtype=torch.bfloat16):
@@ -222,6 +238,10 @@ def evaluate_variant(args,variant,rank,world,device,rt):
             elapsed=time.monotonic()-started
             eta=elapsed/max(done-start_done,1)*(per_rank-done)
             print(f"{variant}: {done}/{per_rank} batches/rank | {elapsed/max(done-start_done,1):.1f}s/batch | ETA {eta/60:.1f}min",flush=True)
+        if done==start_done+1 or done==per_rank:
+            print(f"{variant}: rank={rank} peak_allocated="
+                  f"{torch.cuda.max_memory_allocated(device)/2**30:.2f}GiB peak_reserved="
+                  f"{torch.cuda.max_memory_reserved(device)/2**30:.2f}GiB",flush=True)
         if done%args.save_every==0 or done==per_rank:
             atomic_npz(partial,identity=np.asarray(identity_json),done=np.asarray(done),
                        num_samples=np.asarray(num_samples),error_normalized=errors_n.cpu().numpy(),
@@ -269,6 +289,8 @@ def plot_maps(out):
     zi=json.loads(str(z["identity"]));oi=json.loads(str(o["identity"]))
     for key in ("sample_count","full_test","origins_sha256","channels","amp"):
         assert zi[key]==oi[key],key
+    if zi.get("device","cuda") != oi.get("device","cuda"):
+        raise ValueError("cannot compare mixed CPU/GPU spatial results")
     assert np.array_equal(z["count"],o["count"])
     assert np.array_equal(z["lat"],o["lat"]) and np.array_equal(z["lon"],o["lon"])
     lon=(z["lon"]+180)%360-180;xx=np.argsort(lon)
@@ -310,6 +332,7 @@ def plot_maps(out):
             "Coast outline: aligned FuXi land-mask 0.5 contour.",
             transform=axes.flat[-1].transAxes,va="top",fontsize=11,linespacing=1.5)
         label="FULL TEST" if zi["full_test"] else "SMOKE SUBSET - NOT FULL TEST"
+        label += " | " + zi.get("device", "cuda").upper() + " " + zi["amp"].upper()
         fig.suptitle(f"48h spatial MAE improvement | {mode} MAE | {label}\n"
                      f"Real ZHD/ZWD vs zero inputs; {zi['sample_count']} identical forecast origins",
                      fontsize=18,fontweight="bold")
@@ -343,6 +366,10 @@ def main():
     p.add_argument("--save-every",type=int,default=25)
     p.add_argument("--max-samples",type=int,default=0)
     p.add_argument("--plot-only",action="store_true")
+    p.add_argument("--variant",choices=("zero","obs","both"),default="both",
+                   help="use separate launches per variant under tight memory limits")
+    p.add_argument("--gpu-memory-limit-gib",type=float,default=None,
+                   help="PyTorch allocator cap per rank; excludes some CUDA/NCCL overhead")
     args=p.parse_args()
     if args.plot_only:
         plot_maps(args.output_dir);return
@@ -351,16 +378,27 @@ def main():
     local=int(os.environ.get("LOCAL_RANK","0"))
     if world!=4: p.error("use 4 GPU processes to match the existing evaluation")
     torch.cuda.set_device(local);device=torch.device("cuda",local)
+    if args.gpu_memory_limit_gib is not None:
+        limit=args.gpu_memory_limit_gib*2**30
+        free,total=torch.cuda.mem_get_info(device)
+        if not 0<limit<total:
+            p.error("GPU memory limit must be positive and below GPU capacity")
+        if free<limit+8*2**30:
+            raise RuntimeError("insufficient free memory for requested evaluation cap plus 8GiB headroom")
+        torch.cuda.set_per_process_memory_fraction(limit/total,device)
+        print(f"rank={rank}: PyTorch allocator capped at {args.gpu_memory_limit_gib:g}GiB; "
+              f"initial free={free/2**30:.2f}GiB",flush=True)
     dist.init_process_group("nccl",timeout=timedelta(minutes=60))
     try:
         args.output_dir.mkdir(parents=True,exist_ok=True)
         rt=runtime(args.source_revision)
-        for variant in ("zero","obs"):
+        for variant in (("zero","obs") if args.variant=="both" else (args.variant,)):
             evaluate_variant(args,variant,rank,world,device,rt)
         dist.barrier()
     finally:
         dist.destroy_process_group()
-    if rank==0: plot_maps(args.output_dir)
+    if rank==0 and all((args.output_dir/f"mae48_{v}.npz").exists() for v in ("zero","obs")):
+        plot_maps(args.output_dir)
 
 
 if __name__=="__main__":

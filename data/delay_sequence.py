@@ -7,7 +7,10 @@ from .delay_components import component_inputs, read_components
 
 
 class DelaySequenceDataset(DAForecastDataset):
-    def __init__(self, *, max_steps=8, horizon=1, **kwargs):
+    def __init__(self, *, max_steps=8, horizon=1, mean_origin_inputs=False, **kwargs):
+        if not isinstance(mean_origin_inputs, bool):
+            raise ValueError("mean_origin_inputs must be a boolean")
+        self.mean_origin_inputs = mean_origin_inputs
         super().__init__(**kwargs)
         if not self.predict_delay_components:
             raise ValueError("joint rollout requires component mode")
@@ -29,6 +32,12 @@ class DelaySequenceDataset(DAForecastDataset):
             "component_loss_scales": self.component_loss_scales.tolist(),
             "policy": "original_ztd_encoder_plus_physical_component_adapter_v1",
         }
+        # Reuse the source's FIXED training normalization, never fit to a split.
+        self.origin_component_mean_mm = np.asarray(
+            [self.ztd_stats[0] - self.zwd_stats[0], self.zwd_stats[0]], np.float32)
+        if self.mean_origin_inputs:
+            self.observation_normalization["origin_input_policy"] = "training_mean"
+            self.observation_normalization["origin_component_mean_mm"] = self.origin_component_mean_mm.tolist()
 
     def __getitem__(self, index):
         t = self.sample_time(index)
@@ -57,6 +66,13 @@ class DelaySequenceDataset(DAForecastDataset):
         }
         result.update(component_inputs(self, t))  # ONLY history T-6..T.
         result["obs_component_mask"] = result["obs_component_mask"].bool()
+        if self.mean_origin_inputs:
+            # Replace all 19 origin-history frames, including the last frame
+            # carried into hop 2. The model's residual base sees these means too.
+            # Keep masks/static fields and future supervision unchanged.
+            result["obs_ztd"] = torch.zeros_like(result["obs_ztd"])
+            means = torch.from_numpy(self.origin_component_mean_mm).view(1, 2, 1, 1)
+            result["obs_components"] = torch.where(result["obs_component_mask"], means, 0.)
         # Future GNSS values are LABELS ONLY. Their availability never changes
         # origin selection, input values, or recurrent pseudo-observation masks.
         shape = (self.horizon, 18, 2, len(self.lat), len(self.lon))
@@ -80,4 +96,5 @@ def make_rollout_dataset(data, split, max_steps=8, horizon=1):
             "component_loss_scales", "use_delay_physics", "station_height_path",
             "station_height_datum", "mean_std_dir")
     return DelaySequenceDataset(**{k:data[k] for k in keys if k in data},
-                                split=data[split+"_split"], max_steps=max_steps, horizon=horizon)
+                                split=data[split+"_split"], max_steps=max_steps, horizon=horizon,
+                                mean_origin_inputs=data.get("mean_origin_inputs", False))

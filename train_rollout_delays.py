@@ -39,6 +39,13 @@ def validate_config(config):
     if not 1<=int(c["max_steps"])<=8 or int(c["updates_per_stage"])<1:
         raise ValueError("invalid curriculum limits")
     expected_policy = "zero_all_steps" if m.get("zero_delay_inputs", False) else "predicted_components"
+    mean_origin = config["data"].get("mean_origin_inputs", False)
+    if not isinstance(mean_origin, bool):
+        raise ValueError("mean_origin_inputs must be a boolean")
+    if mean_origin:
+        if m.get("zero_delay_inputs", False):
+            raise ValueError("mean origin requires model.zero_delay_inputs=false to retain predicted feedback")
+        expected_policy = "mean_origin_predicted_components"
     if c.get("observation_policy") != expected_policy:
         raise ValueError(f"observation_policy must be {expected_policy}")
     if t.get("loss_mode")!="global_only":
@@ -102,6 +109,11 @@ def main():
                   "retain masks/static fields and true supervision"
                   if config["model"].get("zero_delay_inputs", False) else
                   "real history at T; predicted ZHD/ZWD and derived ZTD at later hops")
+        if dataset.mean_origin_inputs:
+            policy = (f"origin ZTD(normalized)=0, origin ZHD/ZWD(mm)="
+                      f"{dataset.origin_component_mean_mm.tolist()} (fixed training means); "
+                      "later hops use predicted components/ZTD WITH feedback gradients; "
+                      "retain masks/static fields and true supervision")
         print(f"OBS policy: {policy}; shared model, all branches/heads trainable", flush=True)
     if args.check_data:
         # Inspect one horizon only; all origins already checked through max_steps.

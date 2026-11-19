@@ -1,0 +1,238 @@
+CONDA_ENV_PATH=/inspire/ssd/project/sais-mtm/public/gongjia_data/.cache_global/conda/envs
+INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+NB_PUBLIC_KEYS=
+NVIDIA_VISIBLE_DEVICES=GPU-a671e75d-e643-dbe0-a0c0-cba87c0b81cc,GPU-1d4410aa-06dd-4f80-01f3-0f0e759730ea,GPU-899d25c3-3742-dbab-2664-d032d0d37d27,GPU-943c4b96-5c6a-3a96-42ff-eeb7010513b3
+KUBERNETES_SERVICE_PORT_HTTPS=443
+COLORTERM=truecolor
+KUBERNETES_SERVICE_PORT=443
+NVM_INC=/root/.nvm/versions/node/v22.23.3/include/node
+NB_JUPYTER_VERSION=4.3
+TERM_PROGRAM_VERSION=1.101.2
+WORKSPACE_DIR=/inspire/ssd/project/sais-weather/public
+CONDA_EXE=/opt/conda/bin/conda
+_CE_M=
+PKG_CONFIG_PATH=/etc/inspire/lib/pkgconfig:/etc/inspire/code-server/lib/
+HOSTNAME=linan-4gpu-2--af5b03d639c4-akalao5f7u
+JUPYTER_PYTHON=/etc/inspire/jupyter-4.3/bin/python
+GLOBAL_USER_MOUNT_PATHS=["/inspire/hdd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan","/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan"]
+INSPIRE_GLOBAL_PUBLIC=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_public
+OPENAI_API_KEY=sk-lAWQV3666OrgysELObDmfwzMdOMXMGg3WQRXG01035lBEZpl
+VSCODE_PROXY_URI=https://nb-sais.ai4s.com.cn:8443/ws-5edb0c49-1763-4cab-b5f2-761184700157/project-a5901e4f-4c92-4694-8495-e28a27347595/user-5a412fab-2033-491c-be6c-ae3b13a5258a/vscode/a791b674-8b75-4b80-9439-af5b03d639c4/aa4c1209-9506-406e-a66e-a3ee17f43eb4/proxy/{{port}}/
+XML_CATALOG_FILES=file:///inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/etc/xml/catalog file:///etc/xml/catalog
+PWD=/inspire/ssd/project/sais-weather/public/linan/da-forecast
+NB_PREFIX=/ws-5edb0c49-1763-4cab-b5f2-761184700157/project-a5901e4f-4c92-4694-8495-e28a27347595/user-5a412fab-2033-491c-be6c-ae3b13a5258a/jupyter/a791b674-8b75-4b80-9439-af5b03d639c4/aa4c1209-9506-406e-a66e-a3ee17f43eb4
+RCLONE_CONFIG=/inspire/ssd/project/sais-mtm/public/gongjia_data/.cache_global/rclone/rclone.conf
+GSETTINGS_SCHEMA_DIR=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/share/glib-2.0/schemas
+CONDA_PREFIX=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss
+NVIDIA_DRIVER_CAPABILITIES=compute,utility
+INSPIRE_GLOBAL_USER_SHOW=/inspire/hdd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan                     [34m|[0m@@BR@@[34m|              | [0m/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan                     
+NB_VSCODE_VERSION=V1.101.2
+GSETTINGS_SCHEMA_DIR_CONDA_BACKUP=
+VSCODE_GIT_ASKPASS_NODE=/etc/inspire/code-server-4.101.2-linux-amd64/lib/node
+JUPYTER_DIR=/etc/inspire/jupyter-4.3
+LD_PRELOAD=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/libstdc++.so.6
+HOME=/root
+LANG=en_US.UTF-8
+TERMINADA_SETTINGS={"shell_command": ["/bin/bash", "-c", "cd \"$WORKSPACE_DIR\" && bash"]}
+KUBERNETES_PORT_443_TCP=tcp://10.68.0.1:443
+LS_COLORS=rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=30;41:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.arc=01;31:*.arj=01;31:*.taz=01;31:*.lha=01;31:*.lz4=01;31:*.lzh=01;31:*.lzma=01;31:*.tlz=01;31:*.txz=01;31:*.tzo=01;31:*.t7z=01;31:*.zip=01;31:*.z=01;31:*.dz=01;31:*.gz=01;31:*.lrz=01;31:*.lz=01;31:*.lzo=01;31:*.xz=01;31:*.zst=01;31:*.tzst=01;31:*.bz2=01;31:*.bz=01;31:*.tbz=01;31:*.tbz2=01;31:*.tz=01;31:*.deb=01;31:*.rpm=01;31:*.jar=01;31:*.war=01;31:*.ear=01;31:*.sar=01;31:*.rar=01;31:*.alz=01;31:*.ace=01;31:*.zoo=01;31:*.cpio=01;31:*.7z=01;31:*.rz=01;31:*.cab=01;31:*.wim=01;31:*.swm=01;31:*.dwm=01;31:*.esd=01;31:*.jpg=01;35:*.jpeg=01;35:*.mjpg=01;35:*.mjpeg=01;35:*.gif=01;35:*.bmp=01;35:*.pbm=01;35:*.pgm=01;35:*.ppm=01;35:*.tga=01;35:*.xbm=01;35:*.xpm=01;35:*.tif=01;35:*.tiff=01;35:*.png=01;35:*.svg=01;35:*.svgz=01;35:*.mng=01;35:*.pcx=01;35:*.mov=01;35:*.mpg=01;35:*.mpeg=01;35:*.m2v=01;35:*.mkv=01;35:*.webm=01;35:*.webp=01;35:*.ogm=01;35:*.mp4=01;35:*.m4v=01;35:*.mp4v=01;35:*.vob=01;35:*.qt=01;35:*.nuv=01;35:*.wmv=01;35:*.asf=01;35:*.rm=01;35:*.rmvb=01;35:*.flc=01;35:*.avi=01;35:*.fli=01;35:*.flv=01;35:*.gl=01;35:*.dl=01;35:*.xcf=01;35:*.xwd=01;35:*.yuv=01;35:*.cgm=01;35:*.emf=01;35:*.ogv=01;35:*.ogx=01;35:*.aac=00;36:*.au=00;36:*.flac=00;36:*.m4a=00;36:*.mid=00;36:*.midi=00;36:*.mka=00;36:*.mp3=00;36:*.mpc=00;36:*.ogg=00;36:*.ra=00;36:*.wav=00;36:*.oga=00;36:*.opus=00;36:*.spx=00;36:*.xspf=00;36:
+JUPYTER_BIN=/etc/inspire/jupyter-4.3/bin/jupyter-lab
+PYTORCH_VERSION=2.4.0
+CONDA_PROMPT_MODIFIER=(/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss) 
+GIT_ASKPASS=/etc/inspire/code-server-4.101.2-linux-amd64/lib/vscode/extensions/git/dist/askpass.sh
+PROJECT_MOUNT_PATHS=["/inspire/hdd/project/sais-weather/public","/inspire/alluxio/project/sais-weather/public","/inspire/ssd/project/sais-weather/public"]
+PIP_CACHE_DIR=/inspire/ssd/project/sais-mtm/public/gongjia_data/.cache_global/pip
+NVM_DIR=/root/.nvm
+VSCODE_GIT_ASKPASS_EXTRA_ARGS=
+HF_HOME=/inspire/ssd/project/sais-mtm/public/gongjia_data/.cache_global/huggingface
+GLOBAL_PUBLIC_MOUNT_PATHS=["/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_public"]
+LESSCLOSE=/usr/bin/lesspipe %s %s
+TOKEN=aa4c1209-9506-406e-a66e-a3ee17f43eb4
+CUSTOM_PATH=/etc/inspire
+TERM=xterm-256color
+_CE_CONDA=
+LESSOPEN=| /usr/bin/lesspipe %s
+VSCODE_GIT_IPC_HANDLE=/tmp/vscode-git-c9e2459823.sock
+CONDA_SHLVL=2
+ARCH=x86
+SYS_PYTHON_VERSION=3.11.9
+SHLVL=2
+NVM_CD_FLAGS=
+SYS_PYTHON=/opt/conda/bin/python
+INSPIRE_GLOBAL_USER=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan
+KUBERNETES_PORT_443_TCP_PROTO=tcp
+KUBERNETES_PORT_443_TCP_ADDR=10.68.0.1
+INSPIRE_GLOBAL_PUBLIC_SHOW=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_public                              
+NOTEBOOK_ID=a791b674-8b75-4b80-9439-af5b03d639c4
+CONDA_PYTHON_EXE=/opt/conda/bin/python
+LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+PS1=\[]633;A\](/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss) \[]633;A\][\u:\W]$ \[]633;B\]\[]633;B\]
+CONDA_DEFAULT_ENV=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss
+CONDA_PKGS_DIRS=/inspire/ssd/project/sais-mtm/public/gongjia_data/.cache_global/conda/pkgs
+VC_PREFIX=/ws-5edb0c49-1763-4cab-b5f2-761184700157/project-a5901e4f-4c92-4694-8495-e28a27347595/user-5a412fab-2033-491c-be6c-ae3b13a5258a/vscode/a791b674-8b75-4b80-9439-af5b03d639c4/aa4c1209-9506-406e-a66e-a3ee17f43eb4/
+NB_SSH_OPEN=false
+KUBERNETES_SERVICE_HOST=10.68.0.1
+KUBERNETES_PORT=tcp://10.68.0.1:443
+KUBERNETES_PORT_443_TCP_PORT=443
+VSCODE_GIT_ASKPASS_MAIN=/etc/inspire/code-server-4.101.2-linux-amd64/lib/vscode/extensions/git/dist/askpass-main.js
+SERVER_TYPE=NOTEBOOK
+BROWSER=/etc/inspire/code-server-4.101.2-linux-amd64/lib/vscode/bin/helpers/browser.sh
+PATH=/etc/inspire/code-server-4.101.2-linux-amd64/lib/vscode/bin/remote-cli:/root/.nvm/versions/node/v22.23.3/bin:/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/bin:/opt/conda/condabin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NODE_EXEC_PATH=/etc/inspire/code-server-4.101.2-linux-amd64/lib/node
+RCLONE_CACHE_DIR=/inspire/ssd/project/sais-mtm/public/gongjia_data/.cache_global/rclone
+NVM_BIN=/root/.nvm/versions/node/v22.23.3/bin
+CONDA_PREFIX_1=/opt/conda
+INSPIRE_PROJECT_PUBLIC_SHOW=/inspire/hdd/project/sais-weather/public                                                            [34m|[0m@@BR@@[34m|              | [0m/inspire/alluxio/project/sais-weather/public                                                        [34m|[0m@@BR@@[34m|              | [0m/inspire/ssd/project/sais-weather/public                                                            
+OLDPWD=/inspire/ssd/project/sais-weather/public/linan/da-forecast/work_dirs/da_forecast_rollout48h_predict_delays_mean_origin
+SHARE_MOUNT_PATHS=[]
+TERM_PROGRAM=vscode
+VSCODE_IPC_HOOK_CLI=/tmp/vscode-ipc-0c36deee-4b27-47af-89bf-c610de0159c2.sock
+_=/usr/bin/nohup
+CUDA_VISIBLE_DEVICES=0
+W1119 02:34:03.713000 358345 site-packages/torch/distributed/elastic/agent/server/api.py:739] Received 2 death signal, shutting down workers
+W1119 02:34:03.715000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358373 closing signal SIGINT
+W1119 02:34:03.716000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358374 closing signal SIGINT
+W1119 02:34:03.716000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358375 closing signal SIGINT
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap_external>", line 1440, in _path_importer_cache
+  File "/inspire/ssd/project/sais-weather/public/linan/da-forecast/evaluate_rollout_delays.py", line 7, in <module>
+KeyErrorW1119 02:34:03.716000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358376 closing signal SIGINT
+: '/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/parallel'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/inspire/ssd/project/sais-weather/public/linan/da-forecast/evaluate_rollout_delays.py", line 7, in <module>
+    Traceback (most recent call last):
+import torch
+  File "/inspire/ssd/project/sais-weather/public/linan/da-forecast/evaluate_rollout_delays.py", line 7, in <module>
+    import torch  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/__init__.py", line 2229, in <module>
+
+Traceback (most recent call last):
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/__init__.py", line 2229, in <module>
+  File "/inspire/ssd/project/sais-weather/public/linan/da-forecast/evaluate_rollout_delays.py", line 7, in <module>
+    import torch
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/__init__.py", line 2229, in <module>
+    import torch
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/__init__.py", line 2229, in <module>
+    from torch import _VF as _VF, functional as functional  # usort: skip
+    ^^^^^^^^^^^    ^from torch import _VF as _VF, functional as functional  # usort: skip^
+^^^^    ^from torch import _VF as _VF, functional as functional  # usort: skip^
+^ ^ ^ ^  ^^ ^^ ^^ ^^^^^    ^^^from torch import _VF as _VF, functional as functional  # usort: skip^^^
+^^^^^^^^^^^ ^^^ ^^^ ^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/functional.py", line 8, in <module>
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/functional.py", line 8, in <module>
+^^    
+^import torch.nn.functional as F^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/functional.py", line 8, in <module>
+^^^  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/__init__.py", line 9, in <module>
+^^^^^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/functional.py", line 8, in <module>
+    import torch.nn.functional as F
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/__init__.py", line 9, in <module>
+    import torch.nn.functional as F
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/__init__.py", line 9, in <module>
+    import torch.nn.functional as F
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/__init__.py", line 9, in <module>
+        from torch.nn import (    from torch.nn import (
+from torch.nn import (
+
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/parallel/__init__.py", line 3, in <module>
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/parallel/__init__.py", line 3, in <module>
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/parallel/__init__.py", line 3, in <module>
+    from torch.nn import (
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/nn/parallel/__init__.py", line 3, in <module>
+    from torch.nn.parallel.data_parallel import data_parallel, DataParallel        
+from torch.nn.parallel.data_parallel import data_parallel, DataParallelfrom torch.nn.parallel.data_parallel import data_parallel, DataParallel
+
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1138, in _find_and_load_unlocked
+      File "<frozen importlib._bootstrap_external>", line 936, in exec_module
+from torch.nn.parallel.data_parallel import data_parallel, DataParallel  File "<frozen importlib._bootstrap>", line 1138, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 1078, in _find_spec
+
+  File "<frozen importlib._bootstrap_external>", line 1032, in get_code
+  File "<frozen importlib._bootstrap>", line 1078, in _find_spec
+  File "<frozen importlib._bootstrap_external>", line 1507, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 1130, in get_data
+  File "<frozen importlib._bootstrap_external>", line 1507, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 1476, in _get_spec
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap_external>", line 1479, in _get_spec
+KeyboardInterrupt  File "<frozen importlib._bootstrap_external>", line 1442, in _path_importer_cache
+  File "<frozen importlib._bootstrap>", line 1138, in _find_and_load_unlocked
+
+  File "<frozen importlib._bootstrap_external>", line 1619, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 1418, in _path_hooks
+  File "<frozen importlib._bootstrap>", line 1078, in _find_spec
+  File "<frozen importlib._bootstrap_external>", line 1662, in _fill_cache
+  File "<frozen importlib._bootstrap_external>", line 1701, in path_hook_for_FileFinder
+  File "<frozen importlib._bootstrap_external>", line 1507, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 168, in _path_isdir
+KeyboardInterrupt  File "<frozen importlib._bootstrap_external>", line 1479, in _get_spec
+  File "<frozen importlib._bootstrap_external>", line 153, in _path_is_mode_type
+
+  File "<frozen importlib._bootstrap_external>", line 1619, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 147, in _path_stat
+  File "<frozen importlib._bootstrap_external>", line 1662, in _fill_cache
+KeyboardInterruptKeyboardInterrupt
+
+W1119 02:34:03.802000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358373 closing signal SIGTERM
+W1119 02:34:03.803000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358374 closing signal SIGTERM
+W1119 02:34:03.803000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358375 closing signal SIGTERM
+W1119 02:34:03.803000 358345 site-packages/torch/distributed/elastic/multiprocessing/api.py:1012] Sending process 358376 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/agent/server/api.py", line 731, in run
+    result = self._invoke_run(role)
+             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/agent/server/api.py", line 908, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 86, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 358345 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/run.py", line 994, in <module>
+    main()
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 362, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/run.py", line 990, in main
+    run(args)
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/run.py", line 981, in run
+    elastic_launch(
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 170, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/launcher/api.py", line 308, in launch_agent
+    result = agent.run()
+             ^^^^^^^^^^^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/metrics/api.py", line 134, in wrapper
+    result = f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/agent/server/api.py", line 740, in run
+    self._shutdown(e.sigval)
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 416, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 661, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 1024, in _close
+    handler.proc.wait(time_to_wait)
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/subprocess.py", line 2047, in _wait
+    time.sleep(delay)
+  File "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/python3.11/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 86, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 358345 got signal: 2

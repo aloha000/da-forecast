@@ -66,6 +66,9 @@ def main():
                 "observation_normalization":ds.observation_normalization}
     provenance["observation_policy"] = saved["curriculum"]["observation_policy"]
     provenance["zero_delay_inputs"] = bool(saved["model"].get("zero_delay_inputs", False))
+    provenance["mean_origin_inputs"] = ds.mean_origin_inputs
+    provenance["component_persistence_reference"] = (
+        "fixed_training_mean" if ds.mean_origin_inputs else "last_valid_origin_observation")
     if rank==0:
         print(json.dumps(provenance,indent=2),flush=True)
         if args.steps>saved["curriculum_state"]["stage"]:

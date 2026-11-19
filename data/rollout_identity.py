@@ -19,6 +19,12 @@ def data_identity(config):
         result["component_mode"] = {k: config.get(k) for k in
             ("predict_delay_components", "component_loss_scales", "use_delay_physics",
              "station_height_path", "station_height_datum")}
+    mean_origin = config.get("mean_origin_inputs", False)
+    if not isinstance(mean_origin, bool):
+        raise ValueError("mean_origin_inputs must be a boolean")
+    # Omit false to preserve old checkpoint identities; reject cross-policy eval/resume.
+    if mean_origin:
+        result["mean_origin_inputs"] = True
     hashes = {}
     paths = [config[k] for k in ("conds_path", "global_lat_path", "global_lon_path")]
     paths += [str(Path(config["mean_std_dir"]) / f"{name}_era5.npy") for name in ("mean", "std")]

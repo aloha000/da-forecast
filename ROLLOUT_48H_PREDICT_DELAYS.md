@@ -137,6 +137,8 @@ nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 python -u -m torch.distributed.run \
 
 ## 9. ZTD、ZHD、ZWD 全零输入消融
 
+这是“每一步清零并切断分量反馈”的更强消融。若要只去掉真实起报观测、保留预测反馈，请使用第 10 节，不使用本节配置。
+
 配置：`configs/train_rollout_48h_predict_delays_zero_inputs.json`。
 
 - `model.zero_delay_inputs=true`，`curriculum.observation_policy="zero_all_steps"`。
@@ -181,3 +183,51 @@ nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 python -u -m torch.distributed.run \
   --output-dir work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs/test \
   >> work_dirs/da_forecast_rollout48h_predict_delays_zero_inputs/test/evaluate.log 2>&1 < /dev/null &
 ```
+
+## 10. 推荐：均值起报，后续保留预测分量反馈
+
+配置：`configs/train_rollout_48h_predict_delays_mean_origin.json`。
+
+唯一的观测输入替换发生在 `DelaySequenceDataset.__getitem__`：
+
+- `data.mean_origin_inputs=true`，`curriculum.observation_policy="mean_origin_predicted_components"`。
+- 起报历史的全部 19 帧：ZTD 标准化值填 0；有效站点的 ZHD/ZWD 物理值分别填固定训练均值，缺测位置仍填 0 并保留缺测 mask。
+- 当前数据属性给出的 ZTD 均值为 2320.2390672580573 mm，ZWD 均值为 109.85565038275689 mm；ZHD 均值取二者之差，即 2210.3834168753006 mm。代码从源 Zarr 的 `ztd_train_mean`、`zwd_train_mean` 自动读取，不按当前 batch 或验证/测试集重新计算，输入保持 FP32。
+- ObsEncoder、component adapter 和第一步分量残差基线都只接触替换后的历史。第二步保留的 T 时刻历史帧也已被替换，不会残留真实观测值。
+- 后续步骤继续使用前一步预测的 18 帧 ZHD/ZWD、推导的标准化 ZTD 和预测天气；不再填均值或清零，保留天气及分量反馈两条跨步梯度。
+- ERA5、所有 mask、站点静态信息、真实未来监督标签、网络结构及参数量不变。没有新增模型参数或 buffer。
+- 不开启 `model.zero_delay_inputs` 或旧 `model.zero_ztd`。配置校验禁止把均值起报与每步清零同时打开。
+- 与真实观测实验保持相同初始化 `work_dirs/da_forecast_6h_predict_delays/best.pt`、随机种子、数据划分、损失、学习率、4 卡 FSDP、每卡 batch=1、累积 8、8 阶段 × 500 次更新。不要从已训练的全零实验 `last.pt` resume。
+- 这是“共同初始化下去掉真实起报观测数值”的对照，仍保留站点位置及缺测信息；初始 6h checkpoint 本身曾使用真实观测，不代表整个预训练历史从未使用 GNSS。
+
+后台训练（在 gnss 环境中）：
+
+```bash
+cd /inspire/ssd/project/sais-weather/public/linan/da-forecast
+mkdir -p work_dirs/da_forecast_rollout48h_predict_delays_mean_origin
+nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  LD_PRELOAD=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/libstdc++.so.6 \
+  python -u -m torch.distributed.run \
+  --standalone --nproc_per_node=4 train_rollout_delays.py \
+  --config configs/train_rollout_48h_predict_delays_mean_origin.json \
+  >> work_dirs/da_forecast_rollout48h_predict_delays_mean_origin/train.log 2>&1 < /dev/null &
+```
+
+先做短测试时添加 `--updates-per-stage 1 --gradient-accumulation 1 --overfit-samples 8`，并通过 `--output-dir` 指定单独的 smoke 目录，日志也写入该目录；生产仍使用 500 次更新/阶段，不沿用 smoke checkpoint。
+
+测试集评估必须使用同一均值起报配置，否则数据身份校验会拒绝。结果 metadata 保存 `mean_origin_inputs`、起报均值和反馈策略。该消融结果中分量 `persistence_mae_mm` 的参考是“一直保持训练均值”，不是保留真实起报观测；天气 persistence 仍是 ERA(T)。
+
+```bash
+mkdir -p work_dirs/da_forecast_rollout48h_predict_delays_mean_origin/test
+nohup env CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  LD_PRELOAD=/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/2660-linan/conda-envs/gnss/lib/libstdc++.so.6 \
+  python -u -m torch.distributed.run \
+  --standalone --nproc_per_node=4 evaluate_rollout_delays.py \
+  --config configs/train_rollout_48h_predict_delays_mean_origin.json \
+  --checkpoint work_dirs/da_forecast_rollout48h_predict_delays_mean_origin/stage_48h/best.pt \
+  --split test --steps 8 --batch-size 1 --num-workers 1 \
+  --output-dir work_dirs/da_forecast_rollout48h_predict_delays_mean_origin/test \
+  >> work_dirs/da_forecast_rollout48h_predict_delays_mean_origin/test/evaluate.log 2>&1 < /dev/null &
+```
+
+验证：31 项 CPU 测试通过，覆盖新策略下完整 curriculum、精确恢复、评估 batch-size 不变性、八步分量反馈和梯度、原始观测数值扰动不影响起报输入、mask/标签保留，以及旧策略回归。尚未运行本配置的全球八步 GPU 前后向或正式训练。
